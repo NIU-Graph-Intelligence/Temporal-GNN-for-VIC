@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Data & checkpoints (large, local)
+trainData/
+temporal_graph/
+checkpoints*/
+*.pt
+*.pth
+
+# IDE & OS
+.venv/
+venv/
+.env
+.DS_Store
+*.swp
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
