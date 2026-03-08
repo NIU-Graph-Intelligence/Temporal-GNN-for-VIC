@@ -24,12 +24,12 @@ CONFIG = {
         "checkpoints_unified_two_phase"
     ),
 
-    "phase1_epochs": 50,
+    "phase1_epochs": 30,
     "phase1_lr": 5e-6,                    
     "phase1_bert_lr": 2e-5,                 # CodeBERT only
     "phase1_rest_lr": 1e-4,                 # graph layers + ranker
-    "phase1_bert_freeze_bottom_layers": 12,
-    "phase1_batch_size": 8,
+    "phase1_bert_freeze_bottom_layers": 8,
+    "phase1_batch_size": 32,
     "phase1_patience": 10,
     "phase1_max_pairs_per_test": 100,
 
@@ -43,14 +43,14 @@ CONFIG = {
     "phase2_label_smoothing": 0.1,
     "phase2_top_k_lines": 1,
 
-    "hidden_dim": 1536,
-    "num_gt_layers": 1,
-    "num_heads": 2,          
+    "hidden_dim": 768,
+    "num_gt_layers": 2,
+    "num_heads": 4,          
     "num_edge_types": NUM_EDGE_TYPES,
     "dropout": 0.1,
     "include_bert": True,
     "max_nodes_per_graph": 9500,    
-    "bert_chunk": 256,            
+    "bert_chunk": 64,            
 
   
     "phase2_num_heads": 8,
@@ -61,7 +61,7 @@ CONFIG = {
     "seed": 42,
 
     # GPU
-    "gpu_id": 0,
+    "gpu_id": 1,
 
     # DataLoader
     "num_workers": 4,

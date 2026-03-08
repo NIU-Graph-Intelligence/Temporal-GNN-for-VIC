@@ -126,7 +126,11 @@ def _run_fold(fold_idx, train_idx, val_idx, all_cases,
     p1_model = build_phase1_model(CONFIG, device)
     p1_model.load_state_dict(state, strict=False)
 
-    frozen_enc = copy.deepcopy(p1_model.encoder)
+    frozen_enc = p1_model.encoder
+    for p in frozen_enc.parameters():
+        p.requires_grad = False
+    # frozen_enc = copy.deepcopy(p1_model.encoder)
+
     frozen_enc.eval()
     for p in frozen_enc.parameters():
         p.requires_grad = False
@@ -173,7 +177,7 @@ def _run_fold(fold_idx, train_idx, val_idx, all_cases,
         {"encoder_state_dict": state,
          "commit_ranker_state_dict": p2_result["best_commit_ranker_state"],
          "config": CONFIG},
-        CONFIG["save_dir"] + f"/fold{fold_idx}_unified_best.pt",
+         os.path.join(CONFIG["save_dir"], f"fold{fold_idx}_phase1_best.pt")
     )
     del p2_ds, p2_items; gc.collect(); torch.cuda.empty_cache()
     return p1_result, p2_result

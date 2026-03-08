@@ -100,8 +100,8 @@ class GraphTransformerLayer(nn.Module):
             self.edge_bias = nn.Embedding(num_edge_types, num_heads)
 
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 4), nn.GELU(),
-            nn.Dropout(dropout), nn.Linear(d_model * 4, d_model),
+            nn.Linear(d_model, d_model), nn.GELU(),
+            nn.Dropout(dropout), nn.Linear(d_model, d_model),
         )
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)

@@ -8,6 +8,7 @@ pre-computation step.  This trainer only optimises CommitRankingModule.
 """
 
 import copy
+import gc
 import time
 from collections import defaultdict
 from typing import Dict, List, Tuple
@@ -164,7 +165,7 @@ def train_phase2_fold(fold_idx: int, train_indices: List[int],
     optimizer = AdamW(model.parameters(), lr=config["phase2_lr"],
                       weight_decay=config["phase2_weight_decay"])
     scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.5,
-                                  patience=5, verbose=True)
+                                  patience=5)
     loss_fn = LabelSmoothingRankingLoss(
         temperature=config["phase2_temperature"], margin=1.0,
         smoothing=config["phase2_label_smoothing"])

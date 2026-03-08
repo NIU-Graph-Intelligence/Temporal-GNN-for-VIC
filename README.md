@@ -1,4 +1,4 @@
-# NeuralSZZ
+# Temporal GNN for Vulnerability Inducing Commit
 
 Identify bug-inducing commits using a two-phase neural approach: first rank deletion lines in the fix commit to find root-cause lines, then rank candidate commits using a frozen encoder and a commit-level ranking head.
 
@@ -16,7 +16,7 @@ Identify bug-inducing commits using a two-phase neural approach: first rank dele
 
 ## Motivation
 
-Traditional SZZ-based bug-inducing commit identification relies on heuristics and line-level tracing. This project explores a neural two-phase pipeline:
+Traditional SZZ-based bug-inducing commit identification relies on heuristics and line-level tracing. This project explores a two-phase pipeline:
 
 1. **Phase 1 (Deletion Line Ranking)**: Given a bug-fix commit, rank deletion lines to identify the most likely root-cause lines using pairwise learning and a graph encoder.
 2. **Phase 2 (Commit Ranking)**: Given the top-ranked deletion line and its temporal history, rank candidate bug-inducing commits using pre-computed node embeddings and a commit-level transformer head.
@@ -29,9 +29,8 @@ The encoder is trained only in Phase 1; Phase 2 reuses its frozen representation
 - **Shared graph encoder**: CodeBERT + Graph Transformer with temporal positional encoding
 - **Pre-computed embeddings**: Phase 2 uses cached encoder output; encoder runs once per test case, not per epoch
 - **Batched MiniGraph encoding**: PyG `Batch.from_data_list` for efficient scoring
-- **K-fold cross-validation**: Stratified or plain K-fold over test cases
+- **K-fold cross-validation**: plain K-fold over test cases
 - **Pairwise (Phase 1) and listwise (Phase 2) losses**: BCE pairwise + label-smoothing listwise CE
-- **Timing instrumentation**: Per-step timing in `main.py` for profiling
 
 ## Repository Layout
 
@@ -62,9 +61,6 @@ training/
   evaluation.py           load_true_commit_map, evaluate_topk_metrics, evaluate_ranking
   utils.py                set_seed, setup_device, EarlyStopping, build_phase1_model, etc.
 
-scripts/
-  run_dummy_smoke_test.py Minimal run (12 test cases, 2 folds, 2 epochs) with timing
-  build_temporal_graphs.py (if moved) Pre-compute temporal graphs
 
 trainData/                Raw test cases: <test_name>/info.json, commits.json, <sha>/graph.json
 temporal_graph/           Pre-built graphs: full_graph/<test_name>/del_*.json
@@ -92,10 +88,7 @@ python build_temporal_graphs.py
 # 2. Full training (K-fold, default config)
 python main.py
 
-# 3. Dummy smoke test (12 test cases, 2 folds, 2 epochs)
-python scripts/run_dummy_smoke_test.py
-
-# 4. Override config via CLI
+# Override config via CLI
 python main.py --n-folds 5 --phase1-epochs 10 --phase2-epochs 20 --save-dir ./my_checkpoints
 ```
 
@@ -105,8 +98,6 @@ python main.py --n-folds 5 --phase1-epochs 10 --phase2-epochs 20 --save-dir ./my
 
 - *Building full temporal graphs from V-SZZ history*
 - *Node and edge types (CFG, DFG, LINEMAP, TEMPORAL)*
-- *Output structure: `temporal_graph/full_graph/<test_name>/del_*.json`*
-- *Integration with `build_temporal_graphs.py` and `data.phase1.processing`*
 
 ## Models
 
@@ -149,10 +140,6 @@ python main.py --n-folds 5 --phase1-epochs 10 --phase2-epochs 20 --save-dir ./my
 
 - Phase 1: Precision@1, Recall@1, F1@1.
 - Phase 2: Precision@k, Recall@k, F1@k (k=1,2,3,5), MRR.
-
-### Timing
-
-`main.py` prints elapsed time for: tokenizer init, dataset load, Phase 1 training, build model for scoring, score and cache, precompute Phase 2 embeddings, Phase 2 training, results aggregation.
 
 ## Data
 

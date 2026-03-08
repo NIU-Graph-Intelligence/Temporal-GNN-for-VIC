@@ -227,13 +227,20 @@ def build_phase1_optimizer(model, config: Dict) -> torch.optim.Optimizer:
             [p for p in model.parameters() if p.requires_grad], lr=fallback
         )
 
-    bert_params = (
-        [p for p in model.encoder.bert_model.parameters() if p.requires_grad]
-        if include_bert else []
-    )
+    # ── KEY FIX: use id() to strictly separate the two groups ──
+    # Collect BERT param ids first, then exclude them from rest
+    bert_param_ids = set()
+    bert_params    = []
+
+    if include_bert and hasattr(model.encoder, "bert_model"):
+        for p in model.encoder.bert_model.parameters():
+            if p.requires_grad and id(p) not in bert_param_ids:
+                bert_param_ids.add(id(p))
+                bert_params.append(p)
+
     rest_params = [
         p for name, p in model.named_parameters()
-        if p.requires_grad and "bert_model" not in name
+        if p.requires_grad and id(p) not in bert_param_ids
     ]
     groups = []
     if bert_params:
@@ -243,10 +250,12 @@ def build_phase1_optimizer(model, config: Dict) -> torch.optim.Optimizer:
         groups.append({"params": rest_params,
                        "lr": rest_lr if rest_lr is not None else fallback})
 
-    return torch.optim.Adam(
-        groups or [{"params": [p for p in model.parameters()
+    if not groups:
+        # absolute fallback — should never happen
+        groups = [{"params": [p for p in model.parameters()
                                if p.requires_grad], "lr": fallback}]
-    )
+
+    return torch.optim.Adam(groups)
 
 
 def log_pair_distribution(pairs) -> None:

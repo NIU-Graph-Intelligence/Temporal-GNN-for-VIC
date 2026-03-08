@@ -114,7 +114,7 @@ class Phase1Trainer:
             print(f"  Optimizer group {i}: lr={g['lr']:.2e}, "
                   f"params={sum(p.numel() for p in g['params']):,}")
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="max", factor=0.5, patience=3, verbose=True)
+            self.optimizer, mode="max", factor=0.5, patience=3)
 
         # Training loop
         best_state: Optional[Dict] = None
@@ -127,13 +127,12 @@ class Phase1Trainer:
         bs    = cfg["phase1_batch_size"]
         max_n = cfg.get("max_nodes_per_graph", 9500)
 
+        best_metrics = None
         for epoch in range(1, cfg["phase1_epochs"] + 1):
+            self.model.enable_embedding_cache()
+            tr_loss = self._train_epoch(train_pairs, bs, max_n)
             self.model.clear_embedding_cache()
 
-            tr_loss = self._train_epoch(train_pairs, bs, max_n)
-
-           
-            self.model.enable_embedding_cache()
             vl_loss = self._validate_epoch(val_pairs, bs, max_n)
             val_m   = self._evaluate(ds, val_cases)
             self.model.disable_embedding_cache()
@@ -151,7 +150,8 @@ class Phase1Trainer:
             if f1 > self.best_f1:
                 self.best_f1    = f1
                 self.best_epoch = epoch
-                best_state = copy.deepcopy(self.model.state_dict())
+                best_state   = copy.deepcopy(self.model.state_dict())
+                best_metrics = val_m
                 print(f"  ✓ New best (F1@1={f1:.4f}, epoch {epoch})")
 
             if stopper(f1, epoch):
@@ -161,7 +161,7 @@ class Phase1Trainer:
         if best_state:
             self.model.load_state_dict(best_state)
 
-        final_m = self._evaluate(ds, val_cases)
+        final_m = best_metrics if best_metrics is not None else self._evaluate(ds, val_cases)
         print(f"\n  Fold {fold_idx + 1} best (epoch {self.best_epoch}): "
               f"P@1={final_m.get('precision@1', 0):.4f}, "
               f"R@1={final_m.get('recall@1', 0):.4f}, "
@@ -243,6 +243,9 @@ def _run_pairs_epoch(
     When training=True:  model.train(), shuffle pairs, backprop, clip+step.
     When training=False: model.eval(), torch.no_grad(), no backprop.
 
+    Uses model to batch-encode all unique graphs per batch,
+    reducing encoder calls from ~2*N per batch to ~1 batched call.
+
     Returns average loss per batch.
     """
     if training:
@@ -252,6 +255,11 @@ def _run_pairs_epoch(
         model.eval()
 
     batches = combine_pairs_to_batches(pairs, batch_size)
+
+    # ── DEBUG: show epoch level info ──
+    phase = "Train" if training else "Val"
+    print(f"\n  [{phase}] Starting epoch: {len(pairs)} pairs → {len(batches)} batches of size {batch_size}")
+
     loss_sum, total_valid, skipped_large = 0.0, 0, 0
     errors: Dict = defaultdict(int)
 
@@ -266,49 +274,81 @@ def _run_pairs_epoch(
         for batch in batches:
             if training:
                 optimizer.zero_grad()
-            batch_loss, n_valid = 0.0, 0
-            batch_loss_tensor = None
+
+            # ── Step 1: Validate pairs, build pair_specs ─────────────────
+            pair_specs: List[Tuple] = []
+            pair_probs: List[float] = []
 
             for pair in batch.pairs:
-                try:
-                    x_g, y_g = pair.x.pyg, pair.y.pyg
-                    if x_g is None or y_g is None:
-                        continue
-                    if x_g.num_nodes > max_nodes or y_g.num_nodes > max_nodes:
-                        skipped_large += 1
-                        continue
-                    x_g, y_g = x_g.to(device), y_g.to(device)
-                    x_idx = coerce_idx(pair.x.del_idx)
-                    y_idx = coerce_idx(pair.y.del_idx)
-                    if x_idx >= x_g.num_nodes or y_idx >= y_g.num_nodes:
-                        continue
-                    loss = criterion(
-                        model(x_g, x_idx, y_g, y_idx).view(1),
-                        _target_cache[pair.prob],
-                    )
-                    batch_loss += loss.item()
-                    n_valid += 1
-                    if training and loss.requires_grad:
-                        if batch_loss_tensor is None:
-                            batch_loss_tensor = loss
-                        else:
-                            batch_loss_tensor = batch_loss_tensor + loss
-                except Exception as exc:
-                    if training:
-                        etype = type(exc).__name__
-                        errors[etype] += 1
-                        if errors[etype] <= 3:
-                            print(f"  [Train] {etype}: {str(exc)[:120]}")
-                    if "CUDA" in str(exc) or "out of memory" in str(exc):
-                        torch.cuda.empty_cache()
+                x_g, y_g = pair.x.pyg, pair.y.pyg
+                if x_g is None or y_g is None:
+                    continue
+                if x_g.num_nodes > max_nodes or y_g.num_nodes > max_nodes:
+                    skipped_large += 1
+                    continue
+                x_idx = coerce_idx(pair.x.del_idx)
+                y_idx = coerce_idx(pair.y.del_idx)
+                if x_idx >= x_g.num_nodes or y_idx >= y_g.num_nodes:
+                    continue
+                pair_specs.append((x_g, x_idx, y_g, y_idx))
+                pair_probs.append(pair.prob)
 
-            if training and n_valid > 0:
+            if not pair_specs:
+                continue
+
+            # ── Step 2: Batch encode + extract deletion embeddings ────────
+            # forward now returns stacked tensors ready for ranker
+
+            try:
+                emb_x, emb_y, valid_mask = model(
+                    pair_specs, device, max_nodes
+                )
+            except Exception as exc:
+                etype = type(exc).__name__
+                errors[etype] += 1
+                if errors[etype] <= 3:
+                    print(f"  [{'Train' if training else 'Val'}] "
+                          f"forward {etype}: {str(exc)[:120]}")
+                if "CUDA" in str(exc) or "out of memory" in str(exc):
+                    torch.cuda.empty_cache()
+                continue
+
+            if emb_x is None or len(valid_mask) == 0:
+                continue
+            
+            # ── Step 3: Single batched ranker call ────────────────────────
+            # emb_x: [N, hidden_dim], emb_y: [N, hidden_dim]
+            # ranker does ONE matrix multiply for all N pairs
+            try:
+                probs = model.ranker(emb_x, emb_y)   # [N]
+            except Exception as exc:
+                errors[type(exc).__name__] += 1
+                continue
+
+            # ── Step 4: Build target tensor aligned with valid pairs ──────
+            targets = torch.cat([
+                _target_cache[pair_probs[i]] for i in valid_mask
+            ])   # [N]
+
+            # ── Step 5: Single vectorized loss + single backward ──────────
+            batch_loss = criterion(probs, targets)   # scalar
+
+            if training:
+                batch_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
-            total_valid += n_valid
-            loss_sum += batch_loss / max(n_valid, 1)
 
-    if training and (errors or skipped_large):
-        print(f"  [Train] valid={total_valid}/{len(pairs)}, "
+            loss_sum    += batch_loss.item()
+            total_valid += len(valid_mask)
+
+    # ── DEBUG: end of epoch summary ──
+    print(f"  [{phase}] Epoch done: valid={total_valid}/{len(pairs)}, "
+            f"loss={loss_sum/max(len(batches),1):.4f}")
+
+
+    if errors or skipped_large:
+        phase = "Train" if training else "Val"
+        print(f"  [{phase}] valid={total_valid}/{len(pairs)}, "
               f"skipped_large={skipped_large}, errors={dict(errors)}")
+
     return loss_sum / max(len(batches), 1)
