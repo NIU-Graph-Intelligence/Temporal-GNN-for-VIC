@@ -111,6 +111,7 @@ class DeletionLineRankingModel(nn.Module):
         self.ranker = DeletionLineRanker(hidden_dim)
 
     
+        # To avoid re-encoding the same graph multiple times within a batch
         self._embedding_cache: dict = {}
         self._cache_enabled: bool = False
 
@@ -133,9 +134,8 @@ class DeletionLineRankingModel(nn.Module):
 
     def _cache_tensor(self, h: torch.Tensor) -> torch.Tensor:
         """
-        During training: keep tensor connected to computation graph so all
-        pairs sharing this graph contribute gradients back to BERT.
-        During eval: detach to free memory since no backward is needed.
+        Training: Keep tensor connected to computation graph so all pairs sharing this graph contribute gradients back to BERT.
+        Eval: Detach to free memory since no backward is needed.
         """
         return h if self.training else h.detach()
 
@@ -149,10 +149,10 @@ class DeletionLineRankingModel(nn.Module):
             self._embedding_cache[key] = h
         return h
 
-    def _encode_line(self, pyg, del_idx: int) -> torch.Tensor:
-        """Encode one graph and extract the deletion-line node: [1, hidden_dim]."""
-        h = self._encode_graph(pyg)
-        return h[del_idx].unsqueeze(0)
+    # def _encode_line(self, pyg, del_idx: int) -> torch.Tensor:
+    #     """Encode one graph and extract the deletion-line node: [1, hidden_dim]."""
+    #     h = self._encode_graph(pyg)
+    #     return h[del_idx].unsqueeze(0)
 
     
 
@@ -203,51 +203,18 @@ class DeletionLineRankingModel(nn.Module):
         uncached = [(gid, pyg) for gid, pyg in graph_map.items()
                     if gid not in self._embedding_cache]
 
-        # FIX: define these BEFORE the if block so they always exist
-        # to_batch  = [(gid, pyg) for gid, pyg in uncached
-        #              if pyg.num_nodes <= max_nodes]
-        # to_single = [(gid, pyg) for gid, pyg in uncached
-        #              if pyg.num_nodes > max_nodes]
-
         # Batch encode graphs that fit within max_nodes
         if uncached:
             pyg_list = [pyg.to(device) for _, pyg in uncached]
             batched  = Batch.from_data_list(pyg_list)
             h_all    = self.encoder.encode_pyg(batched)
-            # ── KEY FIX: use ptr tensor for correct graph boundaries ──
-            # batched.ptr = [0, n0, n0+n1, ...] cumulative node counts
-            # This is safer than manual ptr arithmetic and handles
-            # variable-length graphs (Del+commits) correctly
             for i, (gid, _) in enumerate(uncached):
                 start = batched.ptr[i].item()
                 end   = batched.ptr[i + 1].item()
-                # h_slice = h_all[start:end]
                 self._embedding_cache[gid] = self._cache_tensor(h_all[start:end])
 
-            # except Exception:
-            #     # Fallback: encode individually
-            #     for gid, pyg in to_batch:
-            #         try:
-            #             h = self.encoder.encode_pyg(pyg.to(device))
-            #             self._embedding_cache[gid] = (
-            #                 h if self.training else h.detach()
-            #             ) 
-            #         except Exception:
-            #             pass
 
-        # Encode oversized graphs one at a time
-        # for gid, pyg in to_single:
-        #     try:
-        #         h = self.encoder.encode_pyg(pyg.to(device))
-        #         self._embedding_cache[gid] = (
-        #             h if self.training else h.detach()
-        #         )   
-        #     except Exception:
-        #         pass
-
-
-        # ── 3. Extract deletion line embeddings for each pair ──────────────
-        # Collect valid pairs first, then stack — avoids N separate ranker calls
+        # 3. Extract deletion line embeddings for each valid pair 
         emb_x_list:  List[torch.Tensor] = []
         emb_y_list:  List[torch.Tensor] = []
         valid_mask:  List[int]          = []

@@ -3,7 +3,6 @@
 from .minigraph import MiniGraph
 from .pairs import DeletionLinePair, Batch, combine_pairs_to_batches, build_pairs
 from .processing import build_full_graph_structure
-from .dataset import DeletionLineDataset
 
 __all__ = [
     "MiniGraph",
@@ -12,5 +11,4 @@ __all__ = [
     "combine_pairs_to_batches",
     "build_pairs",
     "build_full_graph_structure",
-    "DeletionLineDataset",
 ]

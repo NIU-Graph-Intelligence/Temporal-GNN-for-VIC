@@ -19,8 +19,10 @@ from .utils import (
     clip_and_step,
     build_phase1_model,
     build_phase1_optimizer,
+    build_phase2_model,
     log_pair_distribution,
 )
+from .embedding_cache import score_deletion_lines, build_phase2_items
 from .phase1_trainer import Phase1Trainer, train_phase1_fold
 from .phase2_trainer import train_phase2_fold
 
@@ -42,7 +44,10 @@ __all__ = [
     "clip_and_step",
     "build_phase1_model",
     "build_phase1_optimizer",
+    "build_phase2_model",
     "log_pair_distribution",
+    "score_deletion_lines",
+    "build_phase2_items",
     "Phase1Trainer",
     "train_phase1_fold",
     "train_phase2_fold",

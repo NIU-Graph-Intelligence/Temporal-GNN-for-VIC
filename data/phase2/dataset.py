@@ -16,117 +16,13 @@ Flow (called from main.py → _run_fold):
   3. Phase2EmbeddingDataset           — wraps the items for DataLoader
 """
 
-import json
-from collections import defaultdict
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 from torch.utils.data import Dataset
-from torch_geometric.data import Batch, Data
+from torch_geometric.data import Batch
 
-from config import CONFIG, EDGE_TYPES
-from data.phase1.processing import _find_commit_dir
-
-
-# ── Fix commit graph construction ───────────────────────────────────────────
-
-def _build_section_edges(
-    nodes: List[Dict], node_offset: int,
-) -> List[Tuple[int, int, int]]:
-    """
-    Build CFG/DFG/LINEMAP edges for one commit section using
-    nodeIndex → global mapping (handles non-sequential nodeIndex values).
-    """
-    local_to_global = {
-        node["nodeIndex"]: node_offset + i
-        for i, node in enumerate(nodes)
-    }
-    edges: List[Tuple[int, int, int]] = []
-
-    for node in nodes:
-        src = local_to_global[node["nodeIndex"]]
-        for t in node.get("cfgs", []):
-            if isinstance(t, int) and t in local_to_global:
-                dst = local_to_global[t]
-                edges.append((src, dst, EDGE_TYPES["CFG_FWD"]))
-                edges.append((dst, src, EDGE_TYPES["CFG_BWD"]))
-        for t in node.get("dfgs", []):
-            if isinstance(t, int) and t in local_to_global:
-                dst = local_to_global[t]
-                edges.append((src, dst, EDGE_TYPES["DFG_FWD"]))
-                edges.append((dst, src, EDGE_TYPES["DFG_BWD"]))
-
-    linemap_groups: Dict[int, List[int]] = defaultdict(list)
-    for node in nodes:
-        lm = node.get("lineMapIndex", -1)
-        if lm is not None and lm >= 0:
-            linemap_groups[lm].append(local_to_global[node["nodeIndex"]])
-    for group in linemap_groups.values():
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                edges.append((group[i], group[j], EDGE_TYPES["LINEMAP"]))
-                edges.append((group[j], group[i], EDGE_TYPES["LINEMAP"]))
-
-    return edges
-
-
-def build_fix_commit_pyg(
-    test_dir: Path,
-    fix_commit: str,
-    embedder,
-) -> Optional[Data]:
-    """
-    Load the fix commit's ``graph.json`` and return a PyG Data suitable
-    for encoding through the SharedEncoder.
-
-    Returns None if the graph cannot be loaded.
-    """
-    fix_dir = _find_commit_dir(test_dir, fix_commit)
-    if fix_dir is None:
-        return None
-    fix_graph_path = fix_dir / "graph.json"
-    if not fix_graph_path.exists():
-        return None
-    try:
-        with open(fix_graph_path) as f:
-            fix_nodes = json.load(f)
-    except Exception:
-        return None
-    if not fix_nodes:
-        return None
-
-    codes = [n.get("code", "") for n in fix_nodes]
-    edges = _build_section_edges(fix_nodes, 0)
-    temporal_pos = torch.zeros(len(fix_nodes), dtype=torch.long)
-
-    if edges:
-        src   = torch.tensor([e[0] for e in edges], dtype=torch.long)
-        dst   = torch.tensor([e[1] for e in edges], dtype=torch.long)
-        etype = torch.tensor([e[2] for e in edges], dtype=torch.long)
-        edge_index = torch.stack([src, dst], dim=0)
-    else:
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-        etype      = torch.empty((0,),   dtype=torch.long)
-
-    if getattr(embedder, "tokenizer_only", False):
-        toks = embedder.tokenize_texts(codes)
-        return Data(
-            token_ids=toks["token_ids"],
-            attention_mask=toks["attention_mask"],
-            edge_index=edge_index,
-            edge_type=etype,
-            temporal_pos=temporal_pos,
-            num_nodes=len(fix_nodes),
-        )
-    else:
-        X = embedder.encode_texts(codes)
-        if X.size(0) == 0:
-            return None
-        return Data(
-            x=X, edge_index=edge_index, edge_type=etype,
-            temporal_pos=temporal_pos, num_nodes=X.size(0),
-        )
+from config import CONFIG
 
 
 # ── Scoring + encoder output caching ───────────────────────────────────────
@@ -136,7 +32,7 @@ def score_and_cache_top_embeddings(
     dataset,
     test_cases: List[str],
     device: torch.device,
-) -> Dict[str, Tuple]:
+) -> Dict[str, tuple]:
     """
     Score every deletion line and return the top-1 MiniGraph per test case
     along with its encoder output (cached on CPU).
@@ -152,10 +48,10 @@ def score_and_cache_top_embeddings(
 
     model.eval()
     graphs_dict = dataset.get_mini_graphs_dict()
-    results: Dict[str, Tuple] = {}
+    results: Dict[str, tuple] = {}
     max_nodes = CONFIG.get("max_nodes_per_batch", 4096)
 
-    def _score_batch(batch_list: List[Tuple]) -> None:
+    def _score_batch(batch_list: List[tuple]) -> None:
         """Encode a batch of (mg, gd), score each, update best for this case."""
         nonlocal best_score, best_mg, best_h
         if not batch_list:
@@ -187,17 +83,6 @@ def score_and_cache_top_embeddings(
                             best_score, best_mg, best_h = score, mg, h
                 except Exception:
                     pass
-        #     return
-        # ptr = 0
-        # for mg, gd in batch_list:
-        #     n = gd.num_nodes
-        #     h_i = h_all[ptr : ptr + n]
-        #     ptr += n
-        #     idx = coerce_idx(mg.del_idx)
-        #     if idx < n:
-        #         score = model.ranker.score(h_i[idx].to(device)).item()
-        #         if score > best_score:
-        #             best_score, best_mg, best_h = score, mg, h_i.clone()
 
     with torch.no_grad():
         for name in test_cases:
@@ -207,7 +92,7 @@ def score_and_cache_top_embeddings(
             best_score = float("-inf")
             best_mg    = None
             best_h     = None
-            batch_list: List[Tuple] = []
+            batch_list: List[tuple] = []
             batch_nodes = 0
 
             for mg in graphs_dict[name]:
@@ -246,11 +131,9 @@ def score_and_cache_top_embeddings(
 
 def precompute_phase2_embeddings(
     scored: Dict[str, Tuple],
-    # frozen_encoder,
-    # embedder,
     data_path: str,
     all_cases: List[str]
-) -> List[Dict]:
+) -> List[dict]:
     """
     Build Phase 2 training items from cached Phase 1 encoder outputs.
 
@@ -263,8 +146,7 @@ def precompute_phase2_embeddings(
 
     Returns a list aligned with ``all_cases`` (one item per test case).
     """
-    # frozen_encoder.eval()
-    items: List[Dict] = []
+    items: List[dict] = []
     n_valid = 0
 
     for tc_idx, test_name in enumerate(all_cases):
@@ -286,7 +168,6 @@ def precompute_phase2_embeddings(
         combined_h  = cached_h
         combined_tp = mg.pyg.temporal_pos.cpu()
 
-        gt_positions = []
         tp_to_commit = {0: mg.del_commit[:12] if hasattr(mg, "del_commit") else "fix"}
         tp_to_commit.update(mg.tp_to_commit)
 
@@ -312,8 +193,6 @@ def precompute_phase2_embeddings(
                   f"{n_valid} valid embeddings computed")
 
     print(f"  Phase 2 embeddings: {n_valid}/{len(all_cases)} valid")
-    import sys
-
     total_bytes = 0
     valid_items = [item for item in items if item["valid"]]
 
@@ -396,7 +275,7 @@ def collate_phase2(batch: List[Dict]) -> Optional[List[Dict]]:
         all_indices.append(ci + offset)                         # offset indices
         commit_counts.append(n_commits)
         gt_positions_list.append(
-           item["ground_truth_positions"]  # offset gt too
+           item["ground_truth_positions"]
         )
         offset += n_commits
 

@@ -34,21 +34,15 @@ class PairwiseRankingLoss(nn.Module):
 
 class LabelSmoothingRankingLoss(nn.Module):
     """
-    Listwise ranking loss with label smoothing and a pairwise margin term.
+    ListNet-style ranking loss with label smoothing.
 
     Soft targets replace hard one-hot targets:
       - Ground-truth positions receive   (1 − ε) / num_gt
       - All other positions receive      ε / max(C − num_gt, 1)
-      - Targets are L1-normalised to sum to 1
-
-    The cross-entropy term encourages correct ranking of the full list.
-    The margin term additionally penalises cases where a non-GT commit
-    scores higher than a GT commit by more than ``margin``.
 
     Parameters
     ----------
     temperature : float — softmax temperature (higher → softer distribution)
-    margin      : float — minimum required score gap for the margin term
     smoothing   : float — label smoothing coefficient ε ∈ [0, 1)
     """
 
@@ -75,7 +69,7 @@ class LabelSmoothingRankingLoss(nn.Module):
         # Label smoothing
         smooth_val          = self.smoothing / max(C - n_gt, 1)
         targets             = torch.full((C,), smooth_val, device=scores.device)
-        targets[gt_positions] = 1.0 - self.smoothing + smooth_val
+        targets[ground_truth_positions] = 1.0 - self.smoothing + smooth_val
 
         # ListNet ranking loss
         log_probs = F.log_softmax(scores, dim=0)

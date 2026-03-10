@@ -73,14 +73,18 @@ class CommitRankingModule(nn.Module):
             num_layers=num_commit_transformer_layers,
         )
 
-        # Ranking head
+        # Final Ranking head
         self.ranking_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2), nn.GELU(),
-            nn.Dropout(dropout), nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1),
         )
 
-    def forward(self, node_embeddings: torch.Tensor,
-                commit_indices: torch.Tensor) -> torch.Tensor:
+    def forward(self, 
+                node_embeddings: torch.Tensor,
+                commit_indices: torch.Tensor,
+        ) -> torch.Tensor:
         """
         Args:
             node_embeddings : [N, hidden_dim]  pre-computed by frozen encoder
@@ -89,44 +93,51 @@ class CommitRankingModule(nn.Module):
             scores           : [C]
         """
         device = node_embeddings.device
-
+        N = node_embeddings.size(0)
         num_commits = commit_indices.max().item() + 1
 
-        # node_embeddings: [N, 768] → [N, 256]
+        # node_embeddings: [N, input_dim] → [N, hidden_dim]
         node_embeddings = self.input_proj(node_embeddings)
 
-        # Batch the linear projections once over ALL nodes
-        N = node_embeddings.size(0)
-        K_all = self.k_proj(node_embeddings).view(N, self.num_heads, self.head_dim)
-        V_all = self.v_proj(node_embeddings).view(N, self.num_heads, self.head_dim)
+        # Project all nodes to keys and values in one pass
+        K_all = self.k_proj(node_embeddings).view(N, self.num_heads, self.head_dim) # [N, H, D_h]
+        V_all = self.v_proj(node_embeddings).view(N, self.num_heads, self.head_dim) # [N, H, D_h]
 
-        # sort nodes by commit once (O(N log N)), then split into per-commit chunks
-        sorted_order   = torch.argsort(commit_indices)
-        sorted_commits = commit_indices[sorted_order]
-        K_sorted       = K_all[sorted_order]   # [N, H, D_h]
-        V_sorted       = V_all[sorted_order]   # [N, H, D_h]
+        # Attention logits
+        # → logits: [N, H]  (one logit per node-head pair)
+        logits = torch.einsum( "hd,nhd->nh", self.commit_queries, K_all) * self.scale  
 
-        # sizes[c] = number of nodes belonging to commit c
-        sizes   = torch.bincount(commit_indices, minlength=num_commits).tolist()
-        K_split = torch.split(K_sorted, sizes)  
-        V_split = torch.split(V_sorted, sizes) 
+        # Subtracting the global max across all N nodes is a valid stability
+        idx = commit_indices.unsqueeze(1).expand_as(logits)  # [N, H]
 
-        # Group nodes by commit for the per-commit attention pooling
-        commit_embeddings = []
+        logits_stable = logits - logits.max().detach()        
+        exp_logits = torch.exp(logits_stable)   # [N, H]
 
-        for c in range(num_commits):
-            K = K_split[c]  # [N_c, H, D_h]
-            V = V_split[c]  # [N_c, H, D_h]
+        # per-commit sum of exp — shape [C, H]
+        exp_sum = torch.zeros(num_commits, self.num_heads, device=device)
+        exp_sum.scatter_add_(0, idx, exp_logits)
 
-            attn = F.softmax(
-                torch.einsum("hd,nhd->hn", self.commit_queries, K) * self.scale,
-                dim=-1,
-            )
-            emb = self.out_proj_pool(
-                torch.einsum("hn,nhd->hd", attn, V).reshape(-1))
-            commit_embeddings.append(self.norm_pool(emb))
-            
+        # normalize: divide each node's exp by its commit's sum
+        # exp_sum[commit_indices] broadcasts sum back to each node
+        attn_weights = exp_logits / (exp_sum[commit_indices] + 1e-9)  # [N, H]
 
-        x = torch.stack(commit_embeddings).unsqueeze(1)   # [C, 1, D]
-        x = self.commit_transformer(x).squeeze(1)          # [C, D]
-        return self.ranking_head(x).squeeze(-1)
+        # Step 3 — scatter weighted sum of values
+        # attn_weights: [N, H], V_all: [N, H, D_h]
+        # weighted values: [N, H, D_h]
+        weighted_V = attn_weights.unsqueeze(-1) * V_all   # [N, H, D_h]
+
+        # sum weighted values within each commit → [C, H, D_h]
+        idx_v = commit_indices.view(N, 1, 1).expand_as(weighted_V)
+
+        pooled = torch.zeros(num_commits, self.num_heads, self.head_dim, device=device)
+        pooled.scatter_add_(0, idx_v, weighted_V)   # [C, H, D_h]
+
+        # Step 4 — project and normalize
+        # reshape [C, H, D_h] → [C, H*D_h] = [C, hidden_dim]
+        # then linear projection + LayerNorm
+        commit_embeddings = self.norm_pool(self.out_proj_pool(pooled.reshape(num_commits, -1))) # [C, hidden_dim]
+
+        # Commit transformer + ranking head
+        x = commit_embeddings.unsqueeze(1)         # [C, 1, D] (seq, batch, dim)
+        x = self.commit_transformer(x).squeeze(1)  # [C, D]
+        return self.ranking_head(x).squeeze(-1)     # [C]

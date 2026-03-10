@@ -208,6 +208,19 @@ def build_phase1_model(config: Dict, device: torch.device):
     ).to(device)
 
 
+def build_phase2_model(config: Dict, device: torch.device):
+    """Construct a :class:`CommitRankingModule` from *config*."""
+    from models.phase2_model import CommitRankingModule
+
+    return CommitRankingModule(
+        input_dim=config["hidden_dim"],
+        hidden_dim=config["phase2_hidden_dim"],
+        num_heads=config.get("phase2_num_heads", 4),
+        num_commit_transformer_layers=config["num_commit_transformer_layers"],
+        dropout=config["dropout"],
+    ).to(device)
+
+
 def build_phase1_optimizer(model, config: Dict) -> torch.optim.Optimizer:
     """
     Build Adam with differential learning rates for Phase 1.
