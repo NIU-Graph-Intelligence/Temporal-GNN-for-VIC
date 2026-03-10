@@ -1,256 +1,303 @@
-"""
-main.py
-───────
-Entry point for unified two-phase training:
-    Phase 1  →  Deletion Line Ranking
-    Phase 2  →  Commit Ranking (pre-computed embeddings from frozen encoder)
-"""
-
 import argparse
 import gc
 import json
 import os
 import time
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
-from sklearn.model_selection import KFold
+from sklearn.model_selection import train_test_split
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-from models.shared_encoder import CodeBERTEmbedder
-from data.phase1.dataset import DeletionLineDataset
-from data.phase2.dataset import (
-    Phase2EmbeddingDataset,
-    score_and_cache_top_embeddings,
-    precompute_phase2_embeddings,
-)
-from training.utils import set_seed, setup_device, build_phase1_model
-from training.phase1_trainer import train_phase1_fold
-from training.phase2_trainer import train_phase2_fold
+
 from config import CONFIG
+from data.dataset import (
+    DeletionLineDataset,
+    CommitRankingDataset,
+    collate_commit_ranking,
+)
+from models.shared_encoder import CodeBERTEmbedder
+from torch.utils.data import DataLoader, Subset
+from training.embedding_cache import score_deletion_lines, build_phase2_items
+from training.loss import LabelSmoothingRankingLoss
+from training.phase1_trainer import train_phase1_fold
+from training.phase2_trainer import _run_epoch, train_phase2_fold
+from training.utils import build_phase1_model, build_phase2_model, set_seed, setup_device
 
 
 
-def _parse_args():
+def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Unified two-phase training: "
-                    "Deletion Line Ranking → Commit Ranking")
+                    "Deletion Line Ranking → Commit Ranking"
+    )
     # Phase 1
-    p.add_argument("--phase1-epochs", type=int)
-    p.add_argument("--phase1-lr", type=float, help="Single LR fallback")
-    p.add_argument("--phase1-bert-lr", type=float)
-    p.add_argument("--phase1-rest-lr", type=float)
+    p.add_argument("--phase1-epochs",type=int)
+    p.add_argument("--phase1-lr",type=float)
+    p.add_argument("--phase1-bert-lr",type=float)
+    p.add_argument("--phase1-rest-lr",type=float)
     p.add_argument("--phase1-bert-freeze-bottom-layers", type=int)
-    p.add_argument("--phase1-batch-size", type=int)
-    p.add_argument("--phase1-patience", type=int)
+    p.add_argument("--phase1-batch-size",  type=int)
+    p.add_argument("--phase1-patience",    type=int)
+
     # Phase 2
-    p.add_argument("--phase2-epochs", type=int)
-    p.add_argument("--phase2-lr", type=float)
-    p.add_argument("--phase2-batch-size", type=int)
-    p.add_argument("--phase2-patience", type=int)
+    p.add_argument("--phase2-epochs",   type=int)
+    p.add_argument("--phase2-lr",      type=float)
+    p.add_argument("--phase2-batch-size",  type=int)
+    p.add_argument("--phase2-patience",    type=int)
+
     # Shared
-    p.add_argument("--hidden-dim", type=int)
+    p.add_argument("--hidden-dim",    type=int)
     p.add_argument("--num-gt-layers", type=int)
-    p.add_argument("--dropout", type=float)
-    p.add_argument("--n-folds", type=int)
-    p.add_argument("--seed", type=int)
-    p.add_argument("--save-dir", type=str)
-    p.add_argument("--no-stratify", action="store_true")
+    p.add_argument("--dropout",       type=float)
+    p.add_argument("--seed",          type=int)
+    p.add_argument("--save-dir",      type=str)
+    p.add_argument("--no-stratify",   action="store_true")
+
     # Skip Phase 1
     p.add_argument("--skip-phase1", action="store_true",
-                   help="Load existing Phase 1 checkpoints instead of training")
+                   help="Load existing Phase 1 checkpoint instead of training")
     p.add_argument("--phase1-checkpoint-dir", type=str)
     return p.parse_args()
 
 
-def _apply_cli(args):
+def _apply_cli(args: argparse.Namespace) -> None:
     """Overwrite CONFIG in-place with any CLI arguments that were provided."""
-    mapping = {
-        "phase1_epochs": "phase1_epochs",
-        "phase1_lr": "phase1_lr",
-        "phase1_bert_lr": "phase1_bert_lr",
-        "phase1_rest_lr": "phase1_rest_lr",
-        "phase1_bert_freeze_bottom_layers": "phase1_bert_freeze_bottom_layers",
-        "phase1_batch_size": "phase1_batch_size",
-        "phase1_patience": "phase1_patience",
-        "phase2_epochs": "phase2_epochs",
-        "phase2_lr": "phase2_lr",
-        "phase2_batch_size": "phase2_batch_size",
-        "phase2_patience": "phase2_patience",
-        "hidden_dim": "hidden_dim",
-        "num_gt_layers": "num_gt_layers",
-        "dropout": "dropout",
-        "n_folds": "n_folds",
-        "seed": "seed",
-        "save_dir": "save_dir",
-    }
-    for attr, key in mapping.items():
-        val = getattr(args, attr, None)
+    CLI_KEYS = [
+        "phase1_epochs", "phase1_lr", "phase1_bert_lr", "phase1_rest_lr",
+        "phase1_bert_freeze_bottom_layers", "phase1_batch_size", "phase1_patience",
+        "phase2_epochs", "phase2_lr", "phase2_batch_size", "phase2_patience",
+        "hidden_dim", "num_gt_layers", "dropout", "seed", "save_dir",
+    ]
+    for key in CLI_KEYS:
+        val = getattr(args, key, None)
         if val is not None:
             CONFIG[key] = val
 
 
-# ── Per-fold pipeline ───────────────────────────────────────────────────────
 
-def _run_fold(fold_idx, train_idx, val_idx, all_cases,
-              phase1_dataset, p1_ckpt_dir, skip_p1,
-              device, embedder):
+def _run_phase1(
+    train_cases: List[str],
+    val_cases: List[str],
+    phase1_dataset: DeletionLineDataset,
+    p1_ckpt_path: Path,
+    skip_p1: bool,
+    device: torch.device,
+) -> Optional[Dict]:
+    """
+    Train Phase 1 or load an existing checkpoint.
+    """
+    if skip_p1 and p1_ckpt_path.exists():
+        print(f"\n  Loading Phase 1 checkpoint: {p1_ckpt_path}")
+        state = torch.load(p1_ckpt_path, map_location="cpu")["model_state_dict"]
+        return {"model_state": state, "loaded_from": str(p1_ckpt_path)}
 
-    """Execute Phase 1 + Phase 2 for one fold. Returns (p1_result, p2_result)."""
-    train_cases = [all_cases[i] for i in train_idx]
-    val_cases   = [all_cases[i] for i in val_idx]
+    result = train_phase1_fold(
+        0, train_cases, val_cases, phase1_dataset, CONFIG, device=device
+    )
+    if result is None:
+        return None
 
-    #  Phase 1: train or load 
-    p1_ckpt = p1_ckpt_dir / f"fold{fold_idx}_phase1_best.pt"
-    if skip_p1 and p1_ckpt.exists():
-        print(f"\n  Loading Phase 1 checkpoint: {p1_ckpt}")
-        t0 = time.perf_counter()
-        checkpoint = torch.load(p1_ckpt, map_location="cpu")
-        
-        if "encoder_state_dict" in checkpoint:
-            state = checkpoint["encoder_state_dict"]
-        
+    ckpt_path = Path(CONFIG["save_dir"]) / "phase1_best.pt"
+    torch.save({"model_state_dict": result["model_state"]}, ckpt_path)
+    print(f"  ✓ Phase 1 checkpoint saved to {ckpt_path}")
+    return result
 
-        p1_result = {"model_state": state, "loaded_from": str(p1_ckpt)}
-        print(f"  [{time.perf_counter()-t0:.2f}s] Phase 1 checkpoint load")
-    else:
-        t0 = time.perf_counter()
-        p1_result = train_phase1_fold(
-            fold_idx, train_cases, val_cases, phase1_dataset, CONFIG,
-            device=device)
-        print(f"  [{time.perf_counter()-t0:.2f}s] Phase 1 training")
-        if p1_result is None:
-            return None, None
-        state = p1_result["model_state"]
-        torch.save({"model_state_dict": state},
-                   CONFIG["save_dir"] + f"/fold{fold_idx}_phase1_best.pt")
 
-    # Build Phase 1 model for scoring 
-    t0 = time.perf_counter()
+def _prepare_phase2_data(
+    p1_state: Dict,
+    phase1_dataset: DeletionLineDataset,
+    all_cases: List[str],
+    device: torch.device,
+) -> Tuple[CommitRankingDataset, Dict[str, int]]:
+
+    """
+    Build the Phase 2 embedding dataset from Phase 1 encoder outputs.
+    """
     p1_model = build_phase1_model(CONFIG, device)
-    p1_model.load_state_dict(state, strict=False)
+    p1_model.load_state_dict(p1_state, strict=False)
+    p1_model.encoder.eval()
+    for param in p1_model.encoder.parameters():
+        param.requires_grad = False
 
-    frozen_enc = p1_model.encoder
-    for p in frozen_enc.parameters():
-        p.requires_grad = False
-
-    frozen_enc.eval()
-
-    print(f"  [{time.perf_counter()-t0:.2f}s] Build Phase 1 model for scoring")
-    #  Score deletion lines + cache encoder output
-    all_fold_cases = train_cases + val_cases
-    print(f"\n  Scoring deletion lines for {len(all_fold_cases)} test cases...")
-    t0 = time.perf_counter()
-    scored = score_and_cache_top_embeddings(
-        p1_model, phase1_dataset, all_fold_cases, device)
-    print(f"  [{time.perf_counter()-t0:.2f}s] Score and cache top embeddings")
-    del p1_model; gc.collect(); torch.cuda.empty_cache()
-
-    n_with = len(scored)
-    gt_hits = sum(
-        1 for mg, _ in scored.values()
-        if any(sha[:12] in {g[:12] for g in mg.inducing_commits}
-               for sha in mg.tp_to_commit.values())
+    print(f"\n  Scoring deletion lines for {len(all_cases)} test cases...")
+    scored = score_deletion_lines(
+        p1_model, phase1_dataset, all_cases, device,
+        max_nodes=CONFIG.get("max_nodes_per_batch", 4096),
     )
-    print(f"  Top graphs selected: {n_with}/{len(all_fold_cases)}")
-    if n_with:
-        print(f"  GT in history:       {gt_hits}/{n_with} "
-              f"({100*gt_hits/n_with:.1f}%)")
+    print(f"  Top graphs selected: {len(scored)}/{len(all_cases)}")
 
-    # ── Phase 2: pre-compute embeddings (encoder runs only on fix commits)
-    print(f"\n  Pre-computing Phase 2 embeddings...")
-    t0 = time.perf_counter()
-    p2_items = precompute_phase2_embeddings(
-        scored, CONFIG["data_path"], list(all_cases),
+    del p1_model
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    print("\n  Building Phase 2 embedding items...")
+    p2_items = build_phase2_items(scored, all_cases)
+
+    del scored
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    case_to_idx = {name: i for i, name in enumerate(all_cases)}
+    return CommitRankingDataset(p2_items), case_to_idx
+
+
+def _run_phase2(
+    train_cases: List[str],
+    val_cases: List[str],
+    test_cases: List[str],
+    p2_ds: CommitRankingDataset,
+    case_to_idx: Dict[str, int],
+    device: torch.device,
+) -> Dict:
+    """
+    Train Phase 2 and evaluate on the held-out test set.
+
+    Returns the p2_result dict augmented with ``test_metrics``.
+    """
+    train_idx = [case_to_idx[c] for c in train_cases if c in case_to_idx]
+    val_idx   = [case_to_idx[c] for c in val_cases   if c in case_to_idx]
+    test_idx  = [case_to_idx[c] for c in test_cases  if c in case_to_idx]
+
+    p2_result = train_phase2_fold(0, train_idx, val_idx, p2_ds, CONFIG)
+
+    print(f"\n  Evaluating on held-out test set ({len(test_idx)} cases)...")
+    test_model = build_phase2_model(CONFIG, device)
+    if p2_result.get("best_commit_ranker_state"):
+        test_model.load_state_dict(p2_result["best_commit_ranker_state"])
+
+    test_loader = DataLoader(
+        Subset(p2_ds, test_idx),
+        batch_size=CONFIG["phase2_batch_size"],
+        shuffle=False,
+        collate_fn=collate_commit_ranking,
+        num_workers=0,
     )
-    print(f"  [{time.perf_counter()-t0:.2f}s] Precompute Phase 2 embeddings")
-    del frozen_enc, scored; gc.collect(); torch.cuda.empty_cache()
+    loss_fn = LabelSmoothingRankingLoss(
+        temperature=CONFIG["phase2_temperature"],
+        smoothing=CONFIG["phase2_label_smoothing"],
+    )
 
-    # Phase 2: train CommitRankingModule 
-    p2_ds = Phase2EmbeddingDataset(p2_items)
-    t0 = time.perf_counter()
-    p2_result = train_phase2_fold(
-        fold_idx, list(train_idx), list(val_idx), p2_ds, CONFIG)
-    print(f"  [{time.perf_counter()-t0:.2f}s] Phase 2 training")
+    _, test_m = _run_epoch(
+        test_model, test_loader, None, loss_fn, device, training=False
+    )
+
+    print(
+        f"\n  Test Set Results\n"
+        f"  P@1={test_m.get('precision@1', 0):.4f}  "
+        f"R@1={test_m.get('recall@1', 0):.4f}  "
+        f"F1@1={test_m.get('f1@1', 0):.4f}  "
+        f"MRR={test_m.get('mrr', 0):.4f}"
+    )
+
+    p2_result["test_metrics"] = test_m
+
+    del test_model
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    return p2_result
+
+
+
+def _run(
+    train_cases: List[str],
+    val_cases: List[str],
+    test_cases: List[str],
+    phase1_dataset: DeletionLineDataset,
+    p1_ckpt_dir: Path,
+    skip_p1: bool,
+    device: torch.device,
+) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """Execute Phase 1 + Phase 2 for the single train/val/test split."""
+
+    p1_result = _run_phase1(
+        train_cases, val_cases,
+        phase1_dataset, p1_ckpt_dir / "phase1_best.pt",
+        skip_p1, device,
+    )
+    if p1_result is None:
+        return None, None
+
+    all_cases = train_cases + val_cases + test_cases
+    p2_ds, case_to_idx = _prepare_phase2_data(
+        p1_result["model_state"], phase1_dataset, all_cases, device
+    )
+
+    p2_result = _run_phase2(
+        train_cases, val_cases, test_cases,
+        p2_ds, case_to_idx, device,
+    )
 
     torch.save(
-        {"encoder_state_dict": state,
-         "commit_ranker_state_dict": p2_result["best_commit_ranker_state"],
-         "config": CONFIG},
-         os.path.join(CONFIG["save_dir"], f"fold{fold_idx}_phase1_best.pt")
+        {"model_state_dict": p2_result["best_commit_ranker_state"]},
+        Path(CONFIG["save_dir"]) / "phase2_best.pt",
     )
-    del p2_ds, p2_items; gc.collect(); torch.cuda.empty_cache()
+
+    del p2_ds
+    gc.collect()
+    torch.cuda.empty_cache()
+
     return p1_result, p2_result
 
 
-# Results aggregation 
 
-REPORT_METRICS = [
-    "recall@1", "recall@2", "recall@3", "recall@5",
-    "precision@1", "precision@2", "precision@3", "precision@5",
-    "f1@1", "f1@2", "f1@3", "f1@5",
-    "mrr", "accuracy", "first_rank",
-]
+REPORT_METRICS = ["recall@1", "precision@1", "f1@1"]
 
 
-def _print_and_save(p1_results, p2_results, n_total):
+def _print_and_save(
+    p1_result: Dict,
+    p2_result: Dict,
+    split_info: Dict,
+) -> None:
     print("\n" + "=" * 70)
-    print("K-FOLD CROSS-VALIDATION RESULTS")
+    print("RESULTS")
     print("=" * 70)
 
-    p1_f1s = [r["metrics"].get("f1@1", 0)
-              for r in p1_results if "metrics" in r]
-    if p1_f1s:
-        p1_p1 = [r["metrics"].get("precision@1", 0) for r in p1_results if "metrics" in r]
-        p1_r1 = [r["metrics"].get("recall@1",    0) for r in p1_results if "metrics" in r]
-        print("\nPhase 1 (Deletion Line Ranking) ")
-        print(f"  P@1:  {np.mean(p1_p1):.4f} ± {np.std(p1_p1):.4f}")
-        print(f"  R@1:  {np.mean(p1_r1):.4f} ± {np.std(p1_r1):.4f}")
-        print(f"  F1@1: {np.mean(p1_f1s):.4f} ± {np.std(p1_f1s):.4f}")
+    if p1_result and "metrics" in p1_result:
+        m = p1_result["metrics"]
+        print("\nPhase 1 (Deletion Line Ranking)")
+        print(f"  P@1:  {m.get('precision@1', 0):.4f}")
+        print(f"  R@1:  {m.get('recall@1',    0):.4f}")
+        print(f"  F1@1: {m.get('f1@1',        0):.4f}")
 
-    agg = {m: [r["final_metrics"].get(m, 0) for r in p2_results]
-           for m in REPORT_METRICS}
-    print("\nPhase 2 (Commit Ranking) ")
-    print(f"\n{'Metric':<15} | {'Mean':>8} | {'Std':>8} | {'Min':>8} | {'Max':>8}")
-    print("-" * 60)
-    for m in REPORT_METRICS:
-        vs = agg[m]
-        if vs:
-            print(f"{m:<15} | {np.mean(vs):>8.4f} | {np.std(vs):>8.4f} | "
-                  f"{np.min(vs):>8.4f} | {np.max(vs):>8.4f}")
+    val_m  = p2_result.get("final_metrics", {})
+    test_m = p2_result.get("test_metrics",  {})
 
-    print("\nPer-fold results")
-    for r in p2_results:
-        fm = r["final_metrics"]
-        print(f"  Fold {r['fold']}: P@1={fm.get('precision@1',0):.4f}, "
-              f"R@1={fm.get('recall@1',0):.4f}, F1@1={fm.get('f1@1',0):.4f}, "
-              f"MRR={fm.get('mrr',0):.4f}, best_epoch={r['best_epoch']}")
+    print("\nPhase 2 — Validation (used for model selection)")
+    print(f"  Best epoch : {p2_result.get('best_epoch', 0)}")
+    print(
+        f"  P@1={val_m.get('precision@1', 0):.4f}  "
+        f"R@1={val_m.get('recall@1', 0):.4f}  "
+        f"F1@1={val_m.get('f1@1', 0):.4f}  "
+        f"MRR={val_m.get('mrr', 0):.4f}"
+    )
+
+    print("\nPhase 2 — Test (held-out, final numbers)")
+    print(f"{'Metric':<15} | {'Value':>8}")
+    print("-" * 28)
+    for name in REPORT_METRICS:
+        val = test_m.get(name)
+        if val is not None:
+            print(f"{name:<15} | {val:>8.4f}")
 
     summary = {
-        "config": CONFIG,
-        "data_split": {"total_samples": n_total, "n_folds": CONFIG["n_folds"]},
-        "phase1_summary": {"mean_f1@1": float(np.mean(p1_f1s)) if p1_f1s else None},
-        "phase2_cv_metrics": {
-            m: {"mean": float(np.mean(agg[m])), "std": float(np.std(agg[m])),
-                "values": [float(v) for v in agg[m]]}
-            for m in REPORT_METRICS if agg[m]
-        },
-        "per_fold_phase2": [
-            {k: v for k, v in r.items()
-             if k not in ("best_commit_ranker_state", "history")}
-            for r in p2_results
-        ],
+        "config":              CONFIG,
+        "data_split":          split_info,
+        "phase1_metrics":      p1_result.get("metrics", {}),
+        "phase2_val_metrics":  val_m,
+        "phase2_test_metrics": test_m,
+        "best_epoch":          p2_result.get("best_epoch", 0),
     }
-    path = os.path.join(CONFIG["save_dir"], "unified_kfold_summary.json")
+    path = Path(CONFIG["save_dir"]) / "results_summary.json"
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"\n✓ Summary saved to {path}")
-    return agg
 
 
 
-def main():
+def main() -> None:
     args = _parse_args()
     _apply_cli(args)
 
@@ -259,74 +306,63 @@ def main():
 
     p1_ckpt_dir = Path(
         args.phase1_checkpoint_dir
-        if args.phase1_checkpoint_dir else CONFIG["save_dir"])
+        if args.phase1_checkpoint_dir
+        else CONFIG["save_dir"]
+    )
 
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark        = True
     torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32       = True
 
-    primary = setup_device(CONFIG.get("gpu_id", 0))
+    device = setup_device(CONFIG.get("gpu_id", 0))
 
     print("=" * 70)
     print("UNIFIED TWO-PHASE TRAINING")
-    print(f"  device: {primary}")
+    print(f"  device : {device}")
     print("=" * 70)
 
     with open(Path(CONFIG["data_path"]) / CONFIG["test_cases_file"]) as f:
-        all_cases = json.load(f)
+        all_cases: List[str] = json.load(f)
     print(f"Total test cases: {len(all_cases)}")
 
-    # K-Fold splits
-    idx = np.arange(len(all_cases))
-    splits = list(KFold(CONFIG["n_folds"], shuffle=True,
-                        random_state=CONFIG["seed"]).split(idx))
-
-    print(f"\nK-Fold splits ({CONFIG['n_folds']} folds):")
-    for i, (tr, va) in enumerate(splits):
-        print(f"  Fold {i+1}: train={len(tr)}, val={len(va)}")
-
-    # Shared objects
-    print("\nInitialising CodeBERT tokenizer...")
-    t0 = time.perf_counter()
-    embedder = CodeBERTEmbedder(tokenizer_only=True)
-    print(f"  [{time.perf_counter()-t0:.2f}s] CodeBERT tokenizer init")
-
-    print("\nLoading Phase 1 dataset...")
-    t0 = time.perf_counter()
-    p1_dataset = DeletionLineDataset(
-        data_path=CONFIG["data_path"], test_cases=all_cases,
-        embedder=embedder, prebuilt_dir=CONFIG["prebuilt_dir"],
+    # Fixed 70 / 15 / 15 split — seeded for reproducibility
+    train_cases, temp_cases = train_test_split(
+        all_cases, test_size=0.30, random_state=CONFIG["seed"], shuffle=True
     )
-    print(f"  [{time.perf_counter()-t0:.2f}s] Phase 1 dataset load")
+    val_cases, test_cases = train_test_split(
+        temp_cases, test_size=0.50, random_state=CONFIG["seed"], shuffle=True
+    )
 
-    # Per-fold loop
-    all_p1, all_p2 = [], []
-    total_start = time.perf_counter()
-    for fold_idx, (train_idx, val_idx) in enumerate(splits):
-        print(f"\n{'='*70}")
-        print(f"FOLD {fold_idx+1}/{CONFIG['n_folds']}  "
-              f"(train={len(train_idx)}, val={len(val_idx)})")
-        print(f"{'='*70}")
-        p1_r, p2_r = _run_fold(
-            fold_idx, train_idx, val_idx, all_cases,
-            p1_dataset, p1_ckpt_dir, args.skip_phase1,
-            device=primary, embedder=embedder)
-        if p1_r:
-            all_p1.append(p1_r)
-        if p2_r:
-            all_p2.append(p2_r)
+    n = len(all_cases)
+    print(f"\nData split (seed={CONFIG['seed']}):")
+    for label, subset in [("Train", train_cases), ("Val", val_cases), ("Test", test_cases)]:
+        print(f"  {label:<6}: {len(subset)} cases ({100*len(subset)/n:.1f}%)")
 
-    total_elapsed = time.perf_counter() - total_start
-    print(f"\n  [Total: {total_elapsed:.1f}s] All folds completed")
+    split_info = {
+        "total": n, "train": len(train_cases),
+        "val": len(val_cases), "test": len(test_cases),
+        "seed": CONFIG["seed"], "strategy": "random_70_15_15",
+    }
 
-    t0 = time.perf_counter()
-    agg = _print_and_save(all_p1, all_p2, len(all_cases))
-    print(f"  [{time.perf_counter()-t0:.2f}s] Results aggregation + save")
-    if agg.get("f1@1"):
-        print("\n Final summary ")
-        for m in ["precision@1", "recall@1", "f1@1", "mrr"]:
-            vs = agg[m]
-            print(f"  {m:<12}: {np.mean(vs):.4f} ± {np.std(vs):.4f}")
+    print("\nInitialising CodeBERT tokenizer...")
+    embedder = CodeBERTEmbedder(tokenizer_only=True)
+
+    print("\nLoading dataset...")
+    p1_dataset = DeletionLineDataset(
+        data_path=CONFIG["data_path"],
+        test_cases=all_cases,
+        embedder=embedder,
+        prebuilt_dir=CONFIG["prebuilt_dir"],
+    )
+
+    p1_r, p2_r = _run(
+        train_cases, val_cases, test_cases,
+        p1_dataset, p1_ckpt_dir, args.skip_phase1, device,
+    )
+
+    if p1_r and p2_r:
+        _print_and_save(p1_r, p2_r, split_info)
+
     print(f"\n✓ All outputs saved to: {CONFIG['save_dir']}")
 
 
