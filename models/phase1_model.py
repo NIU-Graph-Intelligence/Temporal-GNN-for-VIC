@@ -24,7 +24,7 @@ For inference (predict):
 """
 
 from typing import Dict, List, Tuple
-
+from contextlib import contextmanager
 import torch
 import torch.nn as nn
 from torch_geometric.data import Batch
@@ -114,19 +114,30 @@ class DeletionLineRankingModel(nn.Module):
         self._embedding_cache: dict = {}
         self._cache_enabled: bool = False
 
-    def clear_embedding_cache(self) -> None:
-        """Drop all cached encoder outputs.  Call at every batch/epoch boundary."""
-        self._embedding_cache.clear()
 
-    def enable_embedding_cache(self) -> None:
-        """Enable caching (call before each batch during training)."""
-        self._embedding_cache.clear()
-        self._cache_enabled = True
+    def set_cache(self, enabled: bool) -> None:
+        """Enable or disable embedding cache, always clears on change."""
+        self._cache_enabled = enabled
+        self._embedding_cache.clear()    
 
-    def disable_embedding_cache(self) -> None:
-        """Disable and clear cache."""
-        self._embedding_cache.clear()
-        self._cache_enabled = False
+    @contextmanager
+    def cache_context(self):
+        """
+        Usage (per-batch during training, per-epoch during validation):
+        """
+        self.set_cache(True)
+        try:
+            yield
+        finally:
+            self.set_cache(False)
+
+    def _cache_tensor(self, h: torch.Tensor) -> torch.Tensor:
+        """
+        During training: keep tensor connected to computation graph so all
+        pairs sharing this graph contribute gradients back to BERT.
+        During eval: detach to free memory since no backward is needed.
+        """
+        return h if self.training else h.detach()
 
     def _encode_graph(self, pyg) -> torch.Tensor:
         """Encode one graph, returning cached result if available."""
@@ -143,20 +154,7 @@ class DeletionLineRankingModel(nn.Module):
         h = self._encode_graph(pyg)
         return h[del_idx].unsqueeze(0)
 
-    # def forward(self, pyg1, del_idx1: int, pyg2, del_idx2: int) -> torch.Tensor:
-    #     """
-    #     Pairwise forward for training.
-
-    #     Encodes each graph independently so only one graph's activations
-    #     are held in memory at a time.
-
-    #     Returns:
-    #         prob : scalar P(line1 > line2)
-    #     """
-    #     return self.ranker(
-    #         self._encode_line(pyg1, del_idx1),
-    #         self._encode_line(pyg2, del_idx2),
-    #     ).squeeze(0)
+    
 
     def predict(self, pyg_data, del_idx: int = 0) -> torch.Tensor:
         """
@@ -206,41 +204,46 @@ class DeletionLineRankingModel(nn.Module):
                     if gid not in self._embedding_cache]
 
         # FIX: define these BEFORE the if block so they always exist
-        to_batch  = [(gid, pyg) for gid, pyg in uncached
-                     if pyg.num_nodes <= max_nodes]
-        to_single = [(gid, pyg) for gid, pyg in uncached
-                     if pyg.num_nodes > max_nodes]
+        # to_batch  = [(gid, pyg) for gid, pyg in uncached
+        #              if pyg.num_nodes <= max_nodes]
+        # to_single = [(gid, pyg) for gid, pyg in uncached
+        #              if pyg.num_nodes > max_nodes]
 
         # Batch encode graphs that fit within max_nodes
-        if to_batch:
-            try:
-                pyg_list = [pyg.to(device) for _, pyg in to_batch]
-                batched  = Batch.from_data_list(pyg_list)
-                h_all    = self.encoder.encode_pyg(batched)
-                # ── KEY FIX: use ptr tensor for correct graph boundaries ──
-                # batched.ptr = [0, n0, n0+n1, ...] cumulative node counts
-                # This is safer than manual ptr arithmetic and handles
-                # variable-length graphs (Del+commits) correctly
-                for i, (gid, _) in enumerate(to_batch):
-                    start = batched.ptr[i].item()
-                    end   = batched.ptr[i + 1].item()
-                    self._embedding_cache[gid] = h_all[start:end].detach()
-            except Exception:
-                # Fallback: encode individually
-                for gid, pyg in to_batch:
-                    try:
-                        h = self.encoder.encode_pyg(pyg.to(device))
-                        self._embedding_cache[gid] = h.detach() 
-                    except Exception:
-                        pass
+        if uncached:
+            pyg_list = [pyg.to(device) for _, pyg in uncached]
+            batched  = Batch.from_data_list(pyg_list)
+            h_all    = self.encoder.encode_pyg(batched)
+            # ── KEY FIX: use ptr tensor for correct graph boundaries ──
+            # batched.ptr = [0, n0, n0+n1, ...] cumulative node counts
+            # This is safer than manual ptr arithmetic and handles
+            # variable-length graphs (Del+commits) correctly
+            for i, (gid, _) in enumerate(uncached):
+                start = batched.ptr[i].item()
+                end   = batched.ptr[i + 1].item()
+                # h_slice = h_all[start:end]
+                self._embedding_cache[gid] = self._cache_tensor(h_all[start:end])
+
+            # except Exception:
+            #     # Fallback: encode individually
+            #     for gid, pyg in to_batch:
+            #         try:
+            #             h = self.encoder.encode_pyg(pyg.to(device))
+            #             self._embedding_cache[gid] = (
+            #                 h if self.training else h.detach()
+            #             ) 
+            #         except Exception:
+            #             pass
 
         # Encode oversized graphs one at a time
-        for gid, pyg in to_single:
-            try:
-                h = self.encoder.encode_pyg(pyg.to(device))
-                self._embedding_cache[gid] = h.detach()   
-            except Exception:
-                pass
+        # for gid, pyg in to_single:
+        #     try:
+        #         h = self.encoder.encode_pyg(pyg.to(device))
+        #         self._embedding_cache[gid] = (
+        #             h if self.training else h.detach()
+        #         )   
+        #     except Exception:
+        #         pass
 
 
         # ── 3. Extract deletion line embeddings for each pair ──────────────

@@ -129,13 +129,13 @@ class Phase1Trainer:
 
         best_metrics = None
         for epoch in range(1, cfg["phase1_epochs"] + 1):
-            self.model.enable_embedding_cache()
-            tr_loss = self._train_epoch(train_pairs, bs, max_n)
-            self.model.clear_embedding_cache()
 
-            vl_loss = self._validate_epoch(val_pairs, bs, max_n)
+            tr_loss = self._train_epoch(train_pairs, bs, max_n)
+
+            with self.model.cache_context():
+                vl_loss = self._validate_epoch(val_pairs, bs, max_n)
+
             val_m   = self._evaluate(ds, val_cases)
-            self.model.disable_embedding_cache()
             f1      = val_m.get("f1@1", 0.0)
 
             self.train_losses.append(tr_loss)
@@ -272,15 +272,18 @@ def _run_pairs_epoch(
     ctx = torch.no_grad() if not training else contextlib.nullcontext()
     with ctx:
         for batch in batches:
-            if training:
-                optimizer.zero_grad()
 
-            # ── Step 1: Validate pairs, build pair_specs ─────────────────
-            pair_specs: List[Tuple] = []
-            pair_probs: List[float] = []
+            cache_ctx = model.cache_context() if training else contextlib.nullcontext()
+            with cache_ctx:
+                if training:
+                    optimizer.zero_grad()
 
-            for pair in batch.pairs:
-                x_g, y_g = pair.x.pyg, pair.y.pyg
+                # ── Step 1: Validate pairs, build pair_specs ─────────────────
+                pair_specs: List[Tuple] = []
+                pair_probs: List[float] = []
+
+                for pair in batch.pairs:
+                    x_g, y_g = pair.x.pyg, pair.y.pyg
                 if x_g is None or y_g is None:
                     continue
                 if x_g.num_nodes > max_nodes or y_g.num_nodes > max_nodes:
@@ -307,10 +310,11 @@ def _run_pairs_epoch(
                 etype = type(exc).__name__
                 errors[etype] += 1
                 if errors[etype] <= 3:
-                    print(f"  [{'Train' if training else 'Val'}] "
-                          f"forward {etype}: {str(exc)[:120]}")
+                    print(f"  [{phase}] forward {etype}: {str(exc)[:120]}")
+
                 if "CUDA" in str(exc) or "out of memory" in str(exc):
                     torch.cuda.empty_cache()
+                
                 continue
 
             if emb_x is None or len(valid_mask) == 0:
@@ -337,6 +341,7 @@ def _run_pairs_epoch(
                 batch_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
+                
 
             loss_sum    += batch_loss.item()
             total_valid += len(valid_mask)

@@ -7,7 +7,6 @@ Entry point for unified two-phase training:
 """
 
 import argparse
-import copy
 import gc
 import json
 import os
@@ -18,6 +17,7 @@ import numpy as np
 import torch
 from sklearn.model_selection import KFold
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from models.shared_encoder import CodeBERTEmbedder
 from data.phase1.dataset import DeletionLineDataset
 from data.phase2.dataset import (
@@ -106,7 +106,12 @@ def _run_fold(fold_idx, train_idx, val_idx, all_cases,
     if skip_p1 and p1_ckpt.exists():
         print(f"\n  Loading Phase 1 checkpoint: {p1_ckpt}")
         t0 = time.perf_counter()
-        state = torch.load(p1_ckpt, map_location="cpu")["model_state_dict"]
+        checkpoint = torch.load(p1_ckpt, map_location="cpu")
+        
+        if "encoder_state_dict" in checkpoint:
+            state = checkpoint["encoder_state_dict"]
+        
+
         p1_result = {"model_state": state, "loaded_from": str(p1_ckpt)}
         print(f"  [{time.perf_counter()-t0:.2f}s] Phase 1 checkpoint load")
     else:
@@ -129,11 +134,8 @@ def _run_fold(fold_idx, train_idx, val_idx, all_cases,
     frozen_enc = p1_model.encoder
     for p in frozen_enc.parameters():
         p.requires_grad = False
-    # frozen_enc = copy.deepcopy(p1_model.encoder)
 
     frozen_enc.eval()
-    for p in frozen_enc.parameters():
-        p.requires_grad = False
 
     print(f"  [{time.perf_counter()-t0:.2f}s] Build Phase 1 model for scoring")
     #  Score deletion lines + cache encoder output
@@ -160,8 +162,7 @@ def _run_fold(fold_idx, train_idx, val_idx, all_cases,
     print(f"\n  Pre-computing Phase 2 embeddings...")
     t0 = time.perf_counter()
     p2_items = precompute_phase2_embeddings(
-        scored, frozen_enc, embedder,
-        CONFIG["data_path"], list(all_cases), device,
+        scored, CONFIG["data_path"], list(all_cases),
     )
     print(f"  [{time.perf_counter()-t0:.2f}s] Precompute Phase 2 embeddings")
     del frozen_enc, scored; gc.collect(); torch.cuda.empty_cache()

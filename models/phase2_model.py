@@ -28,10 +28,13 @@ class CommitRankingModule(nn.Module):
     Trainable commit ranking head operating on pre-computed node embeddings.
     """
 
-    def __init__(self, hidden_dim: int = 256,
-                 num_heads: int = 8,
-                 num_commit_transformer_layers: int = 2,
-                 max_commits: int = 100, dropout: float = 0.2):
+    def __init__(self, 
+        input_dim: int = 768,
+        hidden_dim: int = 256,
+        num_heads: int = 4,
+        num_commit_transformer_layers: int = 1,
+        dropout: float = 0.3
+    ):
 
         super().__init__()
 
@@ -44,6 +47,14 @@ class CommitRankingModule(nn.Module):
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
         self.scale = self.head_dim ** -0.5
+
+        # input_dim=768 (Phase 1 output) → hidden_dim=256 (Phase 2 internal)
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
 
         # Multi-head attention pooling (nodes → one vector per commit)
         self.commit_queries = nn.Parameter(torch.randn(num_heads, self.head_dim))
@@ -69,35 +80,44 @@ class CommitRankingModule(nn.Module):
         )
 
     def forward(self, node_embeddings: torch.Tensor,
-                commit_indices: torch.Tensor,
-                num_commits: int) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+                commit_indices: torch.Tensor) -> torch.Tensor:
         """
         Args:
             node_embeddings : [N, hidden_dim]  pre-computed by frozen encoder
             commit_indices  : [N]              which commit each node belongs to
-            num_commits     : int              total number of commits (C)
         Returns:
             scores           : [C]
-            attention_weights: list of per-commit attention tensors
         """
         device = node_embeddings.device
+
+        num_commits = commit_indices.max().item() + 1
+
+        # node_embeddings: [N, 768] → [N, 256]
+        node_embeddings = self.input_proj(node_embeddings)
 
         # Batch the linear projections once over ALL nodes
         N = node_embeddings.size(0)
         K_all = self.k_proj(node_embeddings).view(N, self.num_heads, self.head_dim)
         V_all = self.v_proj(node_embeddings).view(N, self.num_heads, self.head_dim)
 
+        # sort nodes by commit once (O(N log N)), then split into per-commit chunks
+        sorted_order   = torch.argsort(commit_indices)
+        sorted_commits = commit_indices[sorted_order]
+        K_sorted       = K_all[sorted_order]   # [N, H, D_h]
+        V_sorted       = V_all[sorted_order]   # [N, H, D_h]
+
+        # sizes[c] = number of nodes belonging to commit c
+        sizes   = torch.bincount(commit_indices, minlength=num_commits).tolist()
+        K_split = torch.split(K_sorted, sizes)  
+        V_split = torch.split(V_sorted, sizes) 
+
         # Group nodes by commit for the per-commit attention pooling
-        commit_embeddings, attention_weights = [], []
+        commit_embeddings = []
 
         for c in range(num_commits):
-            mask = commit_indices == c
-            if not mask.any():
-                commit_embeddings.append(torch.zeros(self.hidden_dim, device=device))
-                attention_weights.append(torch.tensor([], device=device))
-                continue
-            K = K_all[mask]          # [N_c, H, D_h]
-            V = V_all[mask]          # [N_c, H, D_h]
+            K = K_split[c]  # [N_c, H, D_h]
+            V = V_split[c]  # [N_c, H, D_h]
+
             attn = F.softmax(
                 torch.einsum("hd,nhd->hn", self.commit_queries, K) * self.scale,
                 dim=-1,
@@ -105,8 +125,8 @@ class CommitRankingModule(nn.Module):
             emb = self.out_proj_pool(
                 torch.einsum("hn,nhd->hd", attn, V).reshape(-1))
             commit_embeddings.append(self.norm_pool(emb))
-            attention_weights.append(attn)
+            
 
         x = torch.stack(commit_embeddings).unsqueeze(1)   # [C, 1, D]
         x = self.commit_transformer(x).squeeze(1)          # [C, D]
-        return self.ranking_head(x).squeeze(-1), attention_weights
+        return self.ranking_head(x).squeeze(-1)

@@ -188,7 +188,7 @@ class SharedEncoder(nn.Module):
                                    len(self.bert_model.encoder.layer))):
                     for p in self.bert_model.encoder.layer[i].parameters():
                         p.requires_grad = False
-            self._bert_anchor = self._find_bert_anchor()
+            # self._bert_anchor = self._find_bert_anchor()
 
         self.input_proj = nn.Sequential(
             nn.Linear(input_dim, hidden_dim), nn.LayerNorm(hidden_dim),
@@ -202,15 +202,15 @@ class SharedEncoder(nn.Module):
             for _ in range(num_gt_layers)
         ])
 
-    def _find_bert_anchor(self):
-        """Find the first trainable non-pooler BERT param (for checkpointing)."""
-        if not self.include_bert:
-            return None
-        return next(
-            (p for name, p in self.bert_model.named_parameters()
-             if p.requires_grad and "pooler" not in name),
-            None,
-        )
+    # def _find_bert_anchor(self):
+    #     """Find the first trainable non-pooler BERT param (for checkpointing)."""
+    #     if not self.include_bert:
+    #         return None
+    #     return next(
+    #         (p for name, p in self.bert_model.named_parameters()
+    #          if p.requires_grad and "pooler" not in name),
+    #         None,
+    #     )
 
     def _run_bert(self, token_ids: torch.Tensor,
                   attention_mask: torch.Tensor) -> torch.Tensor:
@@ -223,18 +223,24 @@ class SharedEncoder(nn.Module):
         """
         dev = next(self.bert_model.parameters()).device
 
-        bert_anchor = self._bert_anchor
+
+        bert_anchor = next(
+                    (p for name, p in self.bert_model.named_parameters()
+                    if p.requires_grad and "pooler" not in name),
+                    None,
+                    )
+        # bert_anchor = self._bert_anchor
         can_checkpoint = self.use_checkpoint and bert_anchor is not None
-        chunk = min(self.bert_chunk, 64) if can_checkpoint else self.bert_chunk
+        # chunk = min(self.bert_chunk, 64) if can_checkpoint else self.bert_chunk
 
         def _cls(anchor, ids, mask):
             return self.bert_model(input_ids=ids,
                                    attention_mask=mask).last_hidden_state[:, 0, :]
 
         pieces = []
-        for i in range(0, token_ids.size(0), chunk):
-            ids_c = token_ids[i:i + chunk].to(dev)
-            mask_c = attention_mask[i:i + chunk].to(dev)
+        for i in range(0, token_ids.size(0), self.bert_chunk):
+            ids_c = token_ids[i:i + self.bert_chunk].to(dev)
+            mask_c = attention_mask[i:i + self.bert_chunk].to(dev)
             if self.training and can_checkpoint:
                 emb = torch.utils.checkpoint.checkpoint(
                     _cls, bert_anchor, ids_c, mask_c)

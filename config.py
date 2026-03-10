@@ -24,7 +24,7 @@ CONFIG = {
         "checkpoints_unified_two_phase"
     ),
 
-    "phase1_epochs": 30,
+    "phase1_epochs": 20,
     "phase1_lr": 5e-6,                    
     "phase1_bert_lr": 2e-5,                 # CodeBERT only
     "phase1_rest_lr": 1e-4,                 # graph layers + ranker
@@ -35,26 +35,27 @@ CONFIG = {
 
     "phase2_epochs": 100,
     "phase2_lr": 5e-5,
-    "phase2_weight_decay": 0.05,
-    "phase2_batch_size": 4,
-    "phase2_patience": 15,
+    "phase2_weight_decay": 0.1,
+    "phase2_batch_size": 32,
+    "phase2_patience": 5,
     "phase2_gradient_accumulation_steps": 2,
     "phase2_temperature": 1.0,
-    "phase2_label_smoothing": 0.1,
+    "phase2_label_smoothing": 0.2,
     "phase2_top_k_lines": 1,
 
+    
     "hidden_dim": 768,
     "num_gt_layers": 2,
     "num_heads": 4,          
     "num_edge_types": NUM_EDGE_TYPES,
-    "dropout": 0.1,
+    "dropout": 0.3,
     "include_bert": True,
     "max_nodes_per_graph": 9500,    
     "bert_chunk": 64,            
 
-  
-    "phase2_num_heads": 8,
-    "num_commit_transformer_layers": 2,
+    "phase2_hidden_dim": 256,
+    "phase2_num_heads": 4,
+    "num_commit_transformer_layers": 1,
     "max_commits": 100,
 
     "n_folds": 10,
