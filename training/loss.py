@@ -52,11 +52,10 @@ class LabelSmoothingRankingLoss(nn.Module):
     smoothing   : float — label smoothing coefficient ε ∈ [0, 1)
     """
 
-    def __init__(self, temperature: float = 1.0, margin: float = 1.0,
+    def __init__(self, temperature: float = 1.0,
                  smoothing: float = 0.1):
         super().__init__()
         self.temperature = temperature
-        self.margin = margin
         self.smoothing = smoothing
 
     def forward(self, scores: torch.Tensor,
@@ -66,41 +65,21 @@ class LabelSmoothingRankingLoss(nn.Module):
             scores                 : [C] one scalar score per commit
             ground_truth_positions : list[int] indices of inducing commits
         """
-        if len(scores) < 2:
-            return torch.tensor(0.0, device=scores.device, requires_grad=True)
 
-        C = len(scores)
-        num_gt = len(ground_truth_positions)
-        if num_gt == 0:
-            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+        C     = scores.size(0)
+        n_gt  = len(ground_truth_positions)
 
-        # Soft targets 
-        gt_t = torch.tensor(
-            [p for p in ground_truth_positions if 0 <= p < C],
-            device=scores.device, dtype=torch.long,
-        )
-        soft = torch.full_like(scores, self.smoothing / max(C - num_gt, 1))
-        if gt_t.numel() > 0:
-            soft[gt_t] = (1.0 - self.smoothing) / num_gt
-        soft = soft / soft.sum()
+        # Temperature scaling
+        scores = scores / self.temperature
 
-        # Cross-entropy 
-        ce = -torch.sum(soft * F.log_softmax(scores / self.temperature, dim=0))
+        # Label smoothing
+        smooth_val          = self.smoothing / max(C - n_gt, 1)
+        targets             = torch.full((C,), smooth_val, device=scores.device)
+        targets[gt_positions] = 1.0 - self.smoothing + smooth_val
 
-        # Pairwise margin (vectorised) 
-        non_gt_mask = torch.ones(C, dtype=torch.bool, device=scores.device)
-        non_gt_mask[gt_t] = False
-
-        if gt_t.numel() > 0 and non_gt_mask.any():
-            gt_scores = scores[gt_t]                     # [G]
-            non_gt_scores = scores[non_gt_mask]           # [C-G]
-            # Broadcasting: [G, 1] - [1, C-G] → [G, C-G]
-            margin_loss = F.relu(
-                self.margin - (gt_scores.unsqueeze(1) - non_gt_scores.unsqueeze(0))
-            ).mean()
-        else:
-            margin_loss = torch.tensor(0.0, device=scores.device)
-
-        return ce + 0.5 * margin_loss
+        # ListNet ranking loss
+        log_probs = F.log_softmax(scores, dim=0)
+        return -(targets * log_probs).sum()
+        
 
 
