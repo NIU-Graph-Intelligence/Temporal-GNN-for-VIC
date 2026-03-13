@@ -6,6 +6,7 @@ primitives for Phase 1 ranking.
 """
 
 import random
+from dataclasses import dataclass, field
 from typing import List
 
 from data.phase1.minigraph import MiniGraph
@@ -26,26 +27,34 @@ class DeletionLinePair:
         self.prob = prob
 
 
-class Batch:
-    """Thin wrapper around a list of DeletionLinePairs."""
+# class Batch:
+#     """Thin wrapper around a list of DeletionLinePairs."""
 
-    def __init__(self, pairs: List[DeletionLinePair]) -> None:
-        self.pairs = pairs
-        self.size  = len(pairs)
+#     def __init__(self, pairs: List[DeletionLinePair]) -> None:
+#         self.pairs = pairs
+#         self.size  = len(pairs)
+
+#     def __len__(self) -> int:
+#         return self.size
+
+
+# def combine_pairs_to_batches(
+#     pairs: List[DeletionLinePair], batch_size: int = 128
+# ) -> List[Batch]:
+#     """Slice ``pairs`` into fixed-size Batch objects."""
+#     return [
+#         Batch(pairs[i : i + batch_size])
+#         for i in range(0, len(pairs), batch_size)
+#     ]
+
+@dataclass
+class TestCaseBatch:
+    test_cases: List[str] = field(default_factory=list)
+    mini_graphs: List[MiniGraph] = field(default_factory=list)
+    pairs: List[DeletionLinePair] = field(default_factory=list)
 
     def __len__(self) -> int:
-        return self.size
-
-
-def combine_pairs_to_batches(
-    pairs: List[DeletionLinePair], batch_size: int = 128
-) -> List[Batch]:
-    """Slice ``pairs`` into fixed-size Batch objects."""
-    return [
-        Batch(pairs[i : i + batch_size])
-        for i in range(0, len(pairs), batch_size)
-    ]
-
+        return len(self.pairs)
 
 def build_pairs(
     graphs: List[MiniGraph], max_pairs: int = 50
@@ -76,3 +85,62 @@ def build_pairs(
     if len(pairs) > max_pairs:
         pairs = random.sample(pairs, max_pairs)
     return pairs
+
+
+def combine_testcases_to_batches(
+    dataset,                          # DeletionLineDataset
+    cases: List[str],
+    max_pairs:            int = 50,
+    max_graphs_per_batch: int = 9500,   # VRAM control: max graphs encoded at once
+) -> List[TestCaseBatch]:
+    """
+    Group test cases into TestCaseBatches capped by ``max_graphs_per_batch``.
+    Each test case contributes len(mini_graphs[name]) graphs. Once adding
+    the next test case would exceed ``max_graphs_per_batch``, the current
+    batch is sealed and a new one starts.
+
+    A single test case that exceeds ``max_graphs_per_batch`` on its own is
+    placed in a batch by itself (handled gracefully — the encoder will just
+    have a large-ish batch for that one case).
+
+    Parameters
+    ----------
+    dataset              : DeletionLineDataset (provides mini_graphs dict)
+    cases                : ordered list of test-case names to batch
+    max_pairs            : passed to build_pairs for within-testcase pair cap
+    max_graphs_per_batch : maximum number of graphs encoded in one forward pass
+    """
+    batches: List[TestCaseBatch] = []
+    current_graphs: List[MiniGraph]        = []
+    current_cases:  List[str]              = []
+    current_pairs:  List[DeletionLinePair] = []
+
+    for name in cases:
+        mgs = dataset.mini_graphs.get(name, [])
+        if not mgs:
+            continue
+
+        # Seal current batch if adding this test case would exceed VRAM limit
+        if current_graphs and len(current_graphs) + len(mgs) > max_graphs_per_batch:
+            batches.append(TestCaseBatch(
+                test_cases=current_cases,
+                mini_graphs=current_graphs,
+                pairs=current_pairs,
+            ))
+            current_graphs = []
+            current_cases  = []
+            current_pairs  = []
+
+        current_cases.append(name)
+        current_graphs.extend(mgs)
+        current_pairs.extend(build_pairs(mgs, max_pairs))
+
+    # Don't forget the last batch
+    if current_graphs:
+        batches.append(TestCaseBatch(
+            test_cases=current_cases,
+            mini_graphs=current_graphs,
+            pairs=current_pairs,
+        ))
+
+    return batches

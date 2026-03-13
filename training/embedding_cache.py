@@ -95,6 +95,8 @@ def score_deletion_lines(
                 batch_list.append((mg, mg.pyg))
                 batch_nodes += n
 
+            _score_batch(batch_list)
+
             if best_mg is not None:
                 results[name] = (best_mg, best_h)
 
@@ -133,20 +135,6 @@ def build_phase2_items(
 
         mg, cached_h = entry
 
-        # # Reuse the encoder output and temporal positions from the Phase 1 graph
-        # combined_h  = cached_h
-        # combined_tp = mg.pyg.temporal_pos.cpu()
-
-        # Resolve the fix-commit SHA safely
-        # if hasattr(mg, "del_commit") and mg.del_commit:
-        #     fix_sha = mg.del_commit[:12]
-        # elif mg.inducing_commits:
-        #     fix_sha = next(iter(mg.inducing_commits))[:12]
-        # else:
-        #     fix_sha = "unknown"
-
-        # tp_to_commit = {0: fix_sha}
-        # tp_to_commit.update(mg.tp_to_commit)
 
         commit_to_tp = {sha[:12]: tp for tp, sha in mg.tp_to_commit.items() if tp > 0}
 
@@ -157,7 +145,7 @@ def build_phase2_items(
         })
 
         node_embeddings = cached_h[1:]
-        commit_indices = mg.pyg.temporal_pos.cpu()[1:] - 1 # re-indexed
+        commit_indices = mg.pyg.temporal_pos.cpu()[1:] - 1 # re-indexed 
         gt_positions = [tp - 1 for tp in gt_positions_raw] 
 
         items.append({

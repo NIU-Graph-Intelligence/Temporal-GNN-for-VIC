@@ -13,8 +13,8 @@ from config import EDGE_TYPES, NUM_EDGE_TYPES
 from .phase1 import (
     MiniGraph,
     DeletionLinePair,
-    Batch,
-    combine_pairs_to_batches,
+    TestCaseBatch,
+    combine_testcases_to_batches,
     build_pairs,
     build_full_graph_structure,
 )
@@ -32,8 +32,8 @@ __all__ = [
     # phase 1 graph structures
     "MiniGraph",
     "DeletionLinePair",
-    "Batch",
-    "combine_pairs_to_batches",
+    "TestCaseBatch",
+    "combine_testcases_to_batches",
     "build_pairs",
     "build_full_graph_structure",
     # datasets

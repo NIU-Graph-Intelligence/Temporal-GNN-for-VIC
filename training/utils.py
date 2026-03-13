@@ -271,7 +271,7 @@ def build_phase1_optimizer(model, config: Dict) -> torch.optim.Optimizer:
     return torch.optim.Adam(groups)
 
 
-def log_pair_distribution(pairs) -> None:
+# def log_pair_distribution(pairs) -> None:
     """Print the pos / neg / tie breakdown of a pair list."""
     counts: Dict = defaultdict(int)
     for p in pairs:

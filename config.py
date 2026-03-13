@@ -29,9 +29,10 @@ CONFIG = {
     "phase1_bert_lr": 2e-5,                 # CodeBERT only
     "phase1_rest_lr": 1e-4,                 # graph layers + ranker
     "phase1_bert_freeze_bottom_layers": 8,
-    "phase1_batch_size": 32,
+    # "phase1_batch_size": 128,
     "phase1_patience": 10,
     "phase1_max_pairs_per_test": 100,
+    "max_graphs_per_batch": 41,
 
     "phase2_epochs": 100,
     "phase2_lr": 5e-5,

@@ -6,6 +6,7 @@ The frozen Phase 1 encoder has already been applied during the embedding pre-com
 
 import copy
 import gc
+import random
 import time
 from collections import defaultdict
 from contextlib import nullcontext
@@ -83,7 +84,7 @@ def _run_epoch(
                     loss = loss_fn(scores, gt)
                     if training:
                         loss = loss / grad_accum
-                    if loss.requires_grad and not torch.isnan(loss):
+                    if not torch.isnan(loss):
                         b_loss  = b_loss + loss
                         b_count += 1
                     with torch.no_grad():
@@ -93,7 +94,7 @@ def _run_epoch(
                 if b_count:
                     total_loss    += b_loss.item() * (grad_accum if training else 1)
                     total_samples += b_count
-                    if training and b_loss.requires_grad:
+                    if training:
                         b_loss.backward()
 
             except Exception as exc:
@@ -157,6 +158,20 @@ def train_phase2_fold(
         pin_memory=False,
         persistent_workers=False,
     )
+
+    train_loader = DataLoader(
+        Subset(phase2_dataset, train_indices),
+        batch_size=config["phase2_batch_size"],
+        shuffle=True,
+        **loader_kw,
+    )
+    val_loader = DataLoader(
+        Subset(phase2_dataset, val_indices),
+        batch_size=config["phase2_batch_size"],
+        shuffle=False,
+        **loader_kw,
+    )
+
     train_loader = DataLoader(
         Subset(phase2_dataset, train_indices),
         batch_size=config["phase2_batch_size"],

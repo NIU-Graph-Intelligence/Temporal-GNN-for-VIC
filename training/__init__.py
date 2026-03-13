@@ -20,7 +20,6 @@ from .utils import (
     build_phase1_model,
     build_phase1_optimizer,
     build_phase2_model,
-    log_pair_distribution,
 )
 from .embedding_cache import score_deletion_lines, build_phase2_items
 from .phase1_trainer import Phase1Trainer, train_phase1_fold
@@ -45,7 +44,6 @@ __all__ = [
     "build_phase1_model",
     "build_phase1_optimizer",
     "build_phase2_model",
-    "log_pair_distribution",
     "score_deletion_lines",
     "build_phase2_items",
     "Phase1Trainer",

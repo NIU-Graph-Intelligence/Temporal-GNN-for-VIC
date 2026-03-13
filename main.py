@@ -38,7 +38,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--phase1-bert-lr",type=float)
     p.add_argument("--phase1-rest-lr",type=float)
     p.add_argument("--phase1-bert-freeze-bottom-layers", type=int)
-    p.add_argument("--phase1-batch-size",  type=int)
+    p.add_argument("--max-graphs-per-batch", type=int)
     p.add_argument("--phase1-patience",    type=int)
 
     # Phase 2
@@ -66,7 +66,7 @@ def _apply_cli(args: argparse.Namespace) -> None:
     """Overwrite CONFIG in-place with any CLI arguments that were provided."""
     CLI_KEYS = [
         "phase1_epochs", "phase1_lr", "phase1_bert_lr", "phase1_rest_lr",
-        "phase1_bert_freeze_bottom_layers", "phase1_batch_size", "phase1_patience",
+        "phase1_bert_freeze_bottom_layers",  "phase1_patience", "max_graphs_per_batch",
         "phase2_epochs", "phase2_lr", "phase2_batch_size", "phase2_patience",
         "hidden_dim", "num_gt_layers", "dropout", "seed", "save_dir",
     ]
@@ -105,16 +105,25 @@ def _run_phase1(
     return result
 
 
+def diagnose_phase1_accuracy(scored, cases, label):
+    correct = sum(
+        1 for name in cases
+        if name in scored and scored[name][0].rootcause
+    )
+    total = sum(1 for name in cases if name in scored)
+    print(f"  Phase 1 top-1 correct ({label}): {correct}/{total} = {correct/max(total,1)*100:.1f}%")
+
+
 def _prepare_phase2_data(
     p1_state: Dict,
     phase1_dataset: DeletionLineDataset,
     all_cases: List[str],
+    train_cases: List[str],   # ← add
+    val_cases: List[str],     # ← add
+    test_cases: List[str],    # ← add
     device: torch.device,
 ) -> Tuple[CommitRankingDataset, Dict[str, int]]:
 
-    """
-    Build the Phase 2 embedding dataset from Phase 1 encoder outputs.
-    """
     p1_model = build_phase1_model(CONFIG, device)
     p1_model.load_state_dict(p1_state, strict=False)
     p1_model.encoder.eval()
@@ -127,6 +136,11 @@ def _prepare_phase2_data(
         max_nodes=CONFIG.get("max_nodes_per_batch", 4096),
     )
     print(f"  Top graphs selected: {len(scored)}/{len(all_cases)}")
+
+    # ── Diagnose BEFORE deleting scored ──────────────────────────
+    diagnose_phase1_accuracy(scored, train_cases, "train")
+    diagnose_phase1_accuracy(scored, val_cases,   "val")
+    diagnose_phase1_accuracy(scored, test_cases,  "test")
 
     del p1_model
     gc.collect()
@@ -141,6 +155,7 @@ def _prepare_phase2_data(
 
     case_to_idx = {name: i for i, name in enumerate(all_cases)}
     return CommitRankingDataset(p2_items), case_to_idx
+
 
 
 def _run_phase2(
@@ -221,10 +236,12 @@ def _run(
         return None, None
 
     all_cases = train_cases + val_cases + test_cases
+   
     p2_ds, case_to_idx = _prepare_phase2_data(
-        p1_result["model_state"], phase1_dataset, all_cases, device
+        p1_result["model_state"], phase1_dataset, all_cases,
+        train_cases, val_cases, test_cases,
+        device,
     )
-
     p2_result = _run_phase2(
         train_cases, val_cases, test_cases,
         p2_ds, case_to_idx, device,
@@ -359,7 +376,6 @@ def main() -> None:
         train_cases, val_cases, test_cases,
         p1_dataset, p1_ckpt_dir, args.skip_phase1, device,
     )
-
     if p1_r and p2_r:
         _print_and_save(p1_r, p2_r, split_info)
 
