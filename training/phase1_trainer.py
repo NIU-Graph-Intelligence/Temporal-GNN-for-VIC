@@ -90,7 +90,7 @@ class Phase1Trainer:
             )
 
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="max", factor=0.5, patience=3
+            self.optimizer, mode="max", factor=0.5, patience=5
         )
 
         stopper  = EarlyStopping(patience=cfg["phase1_patience"], mode="max")

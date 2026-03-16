@@ -114,6 +114,7 @@ def diagnose_phase1_accuracy(scored, cases, label):
     print(f"  Phase 1 top-1 correct ({label}): {correct}/{total} = {correct/max(total,1)*100:.1f}%")
 
 
+
 def _prepare_phase2_data(
     p1_state: Dict,
     phase1_dataset: DeletionLineDataset,
@@ -141,6 +142,13 @@ def _prepare_phase2_data(
     diagnose_phase1_accuracy(scored, train_cases, "train")
     diagnose_phase1_accuracy(scored, val_cases,   "val")
     diagnose_phase1_accuracy(scored, test_cases,  "test")
+
+    # ── Export Phase 1 selected commits (top-1 line) ─────────────
+    commits_json = Path(CONFIG["save_dir"]) / "phase1_selected_commits.json"
+    export_phase1_commits(
+        p1_model, phase1_dataset, all_cases,
+        CONFIG["data_path"], commits_json, device, top_k=1,
+    )
 
     del p1_model
     gc.collect()

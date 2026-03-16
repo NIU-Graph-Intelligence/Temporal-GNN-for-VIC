@@ -201,7 +201,7 @@ def build_phase1_model(config: Dict, device: torch.device):
         num_gt_layers=config["num_gt_layers"],
         num_heads=config["num_heads"],
         num_edge_types=config.get("num_edge_types") or NUM_EDGE_TYPES,
-        dropout=config["dropout"],
+        dropout=config.get("phase1_dropout", config["dropout"]),
         include_bert=config.get("include_bert", True),
         num_bert_layers_freeze=config.get("phase1_bert_freeze_bottom_layers", 0),
         bert_chunk=config.get("bert_chunk", 256),
@@ -225,7 +225,7 @@ def build_phase1_optimizer(model, config: Dict) -> torch.optim.Optimizer:
     """
     Build Adam with differential learning rates for Phase 1.
 
-    CodeBERT (125 M params) → small LR to preserve pre-trained knowledge.
+    CodeBERT → small LR to preserve pre-trained knowledge.
     Graph layers + ranker (random init) → larger LR to converge faster.
     Falls back to a single param group when BERT is disabled or no
     differential LRs are configured.

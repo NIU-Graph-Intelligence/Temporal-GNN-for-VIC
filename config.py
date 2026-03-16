@@ -32,16 +32,17 @@ CONFIG = {
     # "phase1_batch_size": 128,
     "phase1_patience": 10,
     "phase1_max_pairs_per_test": 100,
-    "max_graphs_per_batch": 41,
+    "phase1_dropout": 0.3,
+    "max_graphs_per_batch": 30,
 
     "phase2_epochs": 100,
-    "phase2_lr": 5e-5,
-    "phase2_weight_decay": 0.1,
-    "phase2_batch_size": 32,
-    "phase2_patience": 5,
+    "phase2_lr": 1e-5,
+    "phase2_weight_decay": 0.01,
+    "phase2_batch_size": 16,
+    "phase2_patience": 25,
     "phase2_gradient_accumulation_steps": 2,
     "phase2_temperature": 1.0,
-    "phase2_label_smoothing": 0.2,
+    "phase2_label_smoothing": 0.1,
     "phase2_top_k_lines": 1,
 
     
@@ -49,18 +50,18 @@ CONFIG = {
     "num_gt_layers": 2,
     "num_heads": 4,          
     "num_edge_types": NUM_EDGE_TYPES,
-    "dropout": 0.3,
+    "dropout": 0.5,
     "include_bert": True,
     "max_nodes_per_graph": 9500,    
     "bert_chunk": 64,            
 
-    "phase2_hidden_dim": 256,
+    "phase2_hidden_dim": 96,
     "phase2_num_heads": 4,
     "num_commit_transformer_layers": 1,
     "max_commits": 100,
 
     "n_folds": 10,
-    "seed": 42,
+    "seed": 123,
 
     # GPU
     "gpu_id": 1,
