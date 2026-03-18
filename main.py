@@ -119,9 +119,9 @@ def _prepare_phase2_data(
     p1_state: Dict,
     phase1_dataset: DeletionLineDataset,
     all_cases: List[str],
-    train_cases: List[str],   # ← add
-    val_cases: List[str],     # ← add
-    test_cases: List[str],    # ← add
+    train_cases: List[str],   
+    val_cases: List[str],     
+    test_cases: List[str],
     device: torch.device,
 ) -> Tuple[CommitRankingDataset, Dict[str, int]]:
 
@@ -143,16 +143,9 @@ def _prepare_phase2_data(
     diagnose_phase1_accuracy(scored, val_cases,   "val")
     diagnose_phase1_accuracy(scored, test_cases,  "test")
 
-    # ── Export Phase 1 selected commits (top-1 line) ─────────────
-    commits_json = Path(CONFIG["save_dir"]) / "phase1_selected_commits.json"
-    export_phase1_commits(
-        p1_model, phase1_dataset, all_cases,
-        CONFIG["data_path"], commits_json, device, top_k=1,
-    )
-
     del p1_model
     gc.collect()
-    torch.cuda.empty_cache()
+    # torch.cuda.empty_cache()
 
     print("\n  Building Phase 2 embedding items...")
     p2_items = build_phase2_items(scored, all_cases)
@@ -237,7 +230,8 @@ def _run(
 
     p1_result = _run_phase1(
         train_cases, val_cases,
-        phase1_dataset, p1_ckpt_dir / "phase1_best.pt",
+        # phase1_dataset, p1_ckpt_dir / "phase1_best.pt",
+        phase1_dataset, p1_ckpt_dir / "phase1_bestOverfit99trainresults.pt",
         skip_p1, device,
     )
     if p1_result is None:
@@ -257,7 +251,7 @@ def _run(
 
     torch.save(
         {"model_state_dict": p2_result["best_commit_ranker_state"]},
-        Path(CONFIG["save_dir"]) / "phase2_best.pt",
+        Path(CONFIG["save_dir"]) / "phase2_bestOverfit99trainresults.pt",
     )
 
     del p2_ds

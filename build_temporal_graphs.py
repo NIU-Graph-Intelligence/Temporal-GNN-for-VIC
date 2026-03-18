@@ -62,9 +62,6 @@ def build_graphs(data_path: Path, output_dir: Path, test_cases: list):
             skipped += 1
             continue
 
-        if not all_nodes:
-            skipped += 1
-            continue
 
         # ── Create output directory for this test case ──
         test_output_dir = mode_dir / test_name
@@ -78,8 +75,6 @@ def build_graphs(data_path: Path, output_dir: Path, test_cases: list):
             structure = build_full_graph_structure(
                 all_nodes, node_idx, test_name, data_path
             )
-            if structure is None:
-                continue
 
             output = {
                 "test_name": test_name,

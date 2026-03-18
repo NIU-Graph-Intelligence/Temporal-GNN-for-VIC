@@ -191,8 +191,7 @@ def _build_tp_to_commit(
 ) -> Dict[int, str]:
     """
     Build {temporal_pos → 12-char commit SHA} from the deletion node's
-    history_chains.  Phantom entries (positions with no nodes in the graph)
-    are filtered out automatically.
+    history_chains.
     """
     if not nodes:
         return {}
@@ -248,13 +247,9 @@ def build_full_graph_structure(
             temp_pos   = hist_idx + 1
 
             commit_dir = _find_commit_dir(test_dir, commit_sha)
-            if not commit_dir:
-                continue
 
             graph_path = commit_dir / "graph.json"
-            if not graph_path.exists():
-                continue
-
+            
             try:
                 with open(graph_path) as f:
                     hist_nodes = json.load(f)
@@ -302,3 +297,4 @@ def build_full_graph_structure(
         "edges":              edges,
         "temporal_positions": temporal_positions,
     }
+

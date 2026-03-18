@@ -33,7 +33,7 @@ CONFIG = {
     "phase1_patience": 10,
     "phase1_max_pairs_per_test": 100,
     "phase1_dropout": 0.3,
-    "max_graphs_per_batch": 30,
+    "max_graphs_per_batch": 41,
 
     "phase2_epochs": 100,
     "phase2_lr": 1e-5,
@@ -50,7 +50,7 @@ CONFIG = {
     "num_gt_layers": 2,
     "num_heads": 4,          
     "num_edge_types": NUM_EDGE_TYPES,
-    "dropout": 0.5,
+    "dropout": 0.1,
     "include_bert": True,
     "max_nodes_per_graph": 9500,    
     "bert_chunk": 64,            
@@ -64,7 +64,7 @@ CONFIG = {
     "seed": 123,
 
     # GPU
-    "gpu_id": 1,
+    "gpu_id": 0,
 
     # DataLoader
     "num_workers": 4,

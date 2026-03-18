@@ -27,26 +27,6 @@ class DeletionLinePair:
         self.prob = prob
 
 
-# class Batch:
-#     """Thin wrapper around a list of DeletionLinePairs."""
-
-#     def __init__(self, pairs: List[DeletionLinePair]) -> None:
-#         self.pairs = pairs
-#         self.size  = len(pairs)
-
-#     def __len__(self) -> int:
-#         return self.size
-
-
-# def combine_pairs_to_batches(
-#     pairs: List[DeletionLinePair], batch_size: int = 128
-# ) -> List[Batch]:
-#     """Slice ``pairs`` into fixed-size Batch objects."""
-#     return [
-#         Batch(pairs[i : i + batch_size])
-#         for i in range(0, len(pairs), batch_size)
-#     ]
-
 @dataclass
 class TestCaseBatch:
     test_cases: List[str] = field(default_factory=list)
@@ -57,7 +37,7 @@ class TestCaseBatch:
         return len(self.pairs)
 
 def build_pairs(
-    graphs: List[MiniGraph], max_pairs: int = 50
+    graphs: List[MiniGraph], max_pairs: int = 100
 ) -> List[DeletionLinePair]:
     """
     Generate pairwise training examples from a list of MiniGraphs.
@@ -70,28 +50,34 @@ def build_pairs(
     pos = [g for g in graphs if g.rootcause]
     neg = [g for g in graphs if not g.rootcause]
 
-    pairs: List[DeletionLinePair] = []
-    for rg in pos:
-        for ng in neg:
-            pairs.append(DeletionLinePair(rg, ng, 1.0))
-            pairs.append(DeletionLinePair(ng, rg, 0.0))
-    for i in range(len(pos)):
-        for j in range(i + 1, len(pos)):
-            pairs.append(DeletionLinePair(pos[i], pos[j], 0.5))
-    for i in range(len(neg)):
-        for j in range(i + 1, len(neg)):
-            pairs.append(DeletionLinePair(neg[i], neg[j], 0.5))
+    graphs_ordered = pos + neg
+    pairs = []
+    cnt = 0
 
-    if len(pairs) > max_pairs:
-        pairs = random.sample(pairs, max_pairs)
+    for i in range(len(graphs_ordered)):
+        for j in range(i+1, len(graphs_ordered)):
+            g1, g2 = graphs_ordered[i], graphs_ordered[j]
+
+            if g1.rootcause == g2.rootcause:
+                prob = 0.5
+            elif g1.rootcause:
+                prob = 1.0
+            else:
+                prob = 0.0
+
+            pairs.append(DeletionLinePair(g1, g2, prob))
+            cnt += 1
+
+            if cnt >= max_pairs:
+                return pairs
     return pairs
 
 
 def combine_testcases_to_batches(
     dataset,                          # DeletionLineDataset
     cases: List[str],
-    max_pairs:            int = 50,
-    max_graphs_per_batch: int = 9500,   # VRAM control: max graphs encoded at once
+    max_pairs:            int = 100,
+    max_graphs_per_batch: int = 40,   # VRAM control: max graphs encoded at once
 ) -> List[TestCaseBatch]:
     """
     Group test cases into TestCaseBatches capped by ``max_graphs_per_batch``.
