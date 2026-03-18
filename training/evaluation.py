@@ -48,24 +48,11 @@ def evaluate_topk_metrics(
     data_path: Optional[str] = None,
     k: int = 1,
 ) -> Dict[str, float]:
-    """
-    Evaluate precision@k, recall@k, and F1@k across all test cases.
 
-    Args:
-        test_cases_graphs : {test_name: [MiniGraph list sorted by score desc]}
-        true_cid_map      : optional pre-loaded ground truth (loaded if None)
-        data_path         : path to trainData directory
-        k                 : number of top lines to consider per test case
-
-    Returns:
-        dict with precision@k, recall@k, F1@k, tp@k, fp@k,
-        total_inducing_commits
-    """
     if true_cid_map is None:
         if data_path is None:
             raise ValueError(
-                "Either true_cid_map or data_path must be provided."
-            )
+                "Either true_cid_map or data_path must be provided.")
         true_cid_map = load_true_commit_map(
             list(test_cases_graphs.keys()), data_path)
 
@@ -74,31 +61,87 @@ def evaluate_topk_metrics(
     for test_name, ranked in test_cases_graphs.items():
         if not ranked:
             continue
-        total_t += len(true_cid_map.get(test_name, set()))
-        already_hit = False
-        for graph in ranked[:k]:
-            if graph.rootcause:
-                if not already_hit:
-                    tp += 1
-                    already_hit = True
-                # duplicate rootcause → skip (same commit already counted)
-            else:
-                fp += 1
 
-    precision = tp / (tp + fp) if (tp + fp) else 0.0
-    recall = tp / total_t if total_t else 0.0
-    f1 = (2 * precision * recall / (precision + recall)
-          if (precision + recall) else 0.0)
+        gt_set   = true_cid_map.get(test_name, set())
+        gt_short = {g[:12] for g in gt_set}
+        total_t += len(gt_set)
+        cid_set  = set()
+
+        for mg in ranked[:k]:
+            mg_commits_short = {sha[:12] for sha in mg.tp_to_commit.values()}
+            gt_in_this_line  = mg_commits_short & gt_short
+
+            if gt_in_this_line:
+                new_gt = gt_in_this_line - cid_set
+                if new_gt:
+                    tp += len(new_gt)
+                    cid_set.update(new_gt)
+                continue # GT line — never FP regardless of new_gt being empty
+            
+            fp += 1
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / total_t   if total_t   > 0 else 0.0
+    f1        = (2 * precision * recall / (precision + recall)
+                 if (precision + recall) > 0 else 0.0)
 
     return {
-        f"precision@{k}": precision,
-        f"recall@{k}": recall,
-        f"f1@{k}": f1,
-        f"tp@{k}": tp,
-        f"fp@{k}": fp,
-        "total_inducing_commits": total_t,
+        f'precision@{k}': precision,
+        f'recall@{k}':    recall,
+        f'f1@{k}':        f1,
+        f'tp@{k}':        tp,
+        f'fp@{k}':        fp,
+        'total_inducing_commits': total_t,
     }
 
+
+
+    if true_cid_map is None:
+        if data_path is None:
+            raise ValueError(
+                "Either true_cid_map or data_path must be provided.")
+        true_cid_map = load_true_commit_map(
+            list(test_cases_graphs.keys()), data_path)
+
+    tp = fp = total_t = 0
+
+    for test_name, ranked in test_cases_graphs.items():
+        if not ranked:
+            continue
+
+        gt_set   = true_cid_map.get(test_name, set())
+        gt_short = {g[:12] for g in gt_set}
+        total_t += len(gt_set)          # fixed: count GT commits not deletion lines
+        cid_set  = set()                # prevent same GT commit counted twice
+
+        for mg in ranked[:k]:
+            # Only check direct inducer — tp=1
+            direct_inducer = mg.tp_to_commit.get(1, '')[:12]
+
+            if not direct_inducer:
+                continue
+
+            if direct_inducer in gt_short:
+                if direct_inducer not in cid_set:
+                    tp += 1             # new GT commit found
+                    cid_set.add(direct_inducer)
+                # already counted — SKIP (not FP)
+            else:
+                fp += 1                 # direct inducer not a GT commit → FP
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / total_t   if total_t   > 0 else 0.0
+    f1        = (2 * precision * recall / (precision + recall)
+                 if (precision + recall) > 0 else 0.0)
+
+    return {
+        f'precision@{k}': precision,
+        f'recall@{k}':    recall,
+        f'f1@{k}':        f1,
+        f'tp@{k}':        tp,
+        f'fp@{k}':        fp,
+        'total_inducing_commits': total_t,
+    }
 
 def evaluate_top1_metrics(
     test_cases_graphs: Dict[str, List],
