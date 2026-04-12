@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, Subset
 
 from data.dataset import collate_commit_ranking
 from models.phase2_model import CommitRankingModule
-from training.loss import LabelSmoothingRankingLoss
+from training.loss import LabelSmoothingRankingLoss, CommitRankingLoss
 from training.utils import (
     EarlyStopping,
     aggregate_global_metrics,
@@ -72,6 +72,7 @@ def _run_epoch(
                 scores_all = model(
                     batch["node_embeddings"].to(device),
                     batch["commit_indices"].to(device),
+                    batch["is_temporal_node"].to(device),
                 )
                 scores_list = torch.split(scores_all, batch["commit_counts"])
 
@@ -90,6 +91,7 @@ def _run_epoch(
                     with torch.no_grad():
                         for k, v in compute_metrics(scores, gt).items():
                             all_m[k].append(v)
+                
 
                 if b_count:
                     total_loss    += b_loss.item() * (grad_accum if training else 1)
@@ -150,7 +152,7 @@ def train_phase2_fold(
     print(f"  PHASE 2 — Fold {fold_idx + 1}: Commit Ranking")
     print(f"{'─'*60}")
 
-    device = setup_device(config.get("gpu_id", 0))
+    device = setup_device(config["defaults"].get("gpu_id", 0))
 
     loader_kw = dict(
         collate_fn=collate_commit_ranking,
@@ -161,26 +163,26 @@ def train_phase2_fold(
 
     train_loader = DataLoader(
         Subset(phase2_dataset, train_indices),
-        batch_size=config["phase2_batch_size"],
+        batch_size=config["phase2"]["batch_size"],
         shuffle=True,
         **loader_kw,
     )
     val_loader = DataLoader(
         Subset(phase2_dataset, val_indices),
-        batch_size=config["phase2_batch_size"],
+        batch_size=config["phase2"]["batch_size"],
         shuffle=False,
         **loader_kw,
     )
 
     train_loader = DataLoader(
         Subset(phase2_dataset, train_indices),
-        batch_size=config["phase2_batch_size"],
+        batch_size=config["phase2"]["batch_size"],
         shuffle=True,
         **loader_kw,
     )
     val_loader = DataLoader(
         Subset(phase2_dataset, val_indices),
-        batch_size=config["phase2_batch_size"],
+        batch_size=config["phase2"]["batch_size"],
         shuffle=False,
         **loader_kw,
     )
@@ -191,16 +193,24 @@ def train_phase2_fold(
 
     optimizer = AdamW(
         model.parameters(),
-        lr=config["phase2_lr"],
-        weight_decay=config["phase2_weight_decay"],
+        lr=config["phase2"]["lr"],
+        weight_decay=config["phase2"]["weight_decay"],
     )
     scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=5)
     loss_fn   = LabelSmoothingRankingLoss(
-        temperature=config["phase2_temperature"],
-        smoothing=config["phase2_label_smoothing"],
+        temperature=config["phase2"]["temperature"],
+        margin=config["phase2"]["margin"],
+        smoothing=config["phase2"]["label_smoothing"],
+        focal_gamma=config["phase2"]["focal_gamma"],
+        focal_alpha=config["phase2"]["focal_alpha"],
     )
-    stopper = EarlyStopping(patience=config["phase2_patience"], mode="max")
-    ga      = config["phase2_gradient_accumulation_steps"]
+    # loss_fn = CommitRankingLoss(
+    #     temperature=config["phase2"]["temperature"],
+    #     margin=config["phase2"]["margin"],
+    #     smoothing=config["phase2"]["label_smoothing"],
+    # )
+    stopper = EarlyStopping(patience=config["phase2"]["patience"], mode="max")
+    ga      = config["phase2"]["gradient_accumulation_steps"]
 
     best_f1, best_epoch         = 0.0, 0
     best_state: Optional[Dict]  = None
@@ -210,16 +220,16 @@ def train_phase2_fold(
         "train_f1@1": [], "val_f1@1": [],
     }
 
-    for epoch in range(1, config["phase2_epochs"] + 1):
+    for epoch in range(1, config["phase2"]["epochs"] + 1):
         t0 = time.time()
 
         tr_loss, tr_m = _run_epoch(
             model, train_loader, optimizer, loss_fn, device,
-            training=True, log_interval=config["log_interval"], grad_accum=ga,
-        )
+            training=True, log_interval=config["defaults"]["log_interval"], grad_accum=ga)
+        
         vl_loss, vl_m = _run_epoch(
             model, val_loader, optimizer, loss_fn, device,
-            training=False,
+            training=False
         )
 
         vl_f1 = vl_m.get("f1@1", 0.0)

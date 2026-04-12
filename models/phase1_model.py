@@ -29,8 +29,132 @@ import torch
 import torch.nn as nn
 from torch_geometric.data import Batch
 
-from config import NUM_EDGE_TYPES
+from data.constants import NUM_EDGE_TYPES
 from .shared_encoder import SharedEncoder, EMB_DIM
+
+
+# class DeletionLineRanker(nn.Module):
+#     def __init__(self, hidden_dim: int = 1536):
+#         super().__init__()
+#         self.scorer = nn.Linear(hidden_dim, 1)
+    
+#     def forward(self, emb: torch.Tensor) -> torch.Tensor:
+#         return self.scorer(emb).squeeze(-1)
+
+# class DeletionLineRankingModel(nn.Module):
+
+    # """
+    # Full Phase 1 model: SharedEncoder + DeletionLineRanker.
+
+    # When include_bert=True  (default) PyG data carries token_ids +
+    # attention_mask; CodeBERT is fine-tuned jointly.
+    # When include_bert=False PyG data carries pre-computed x embeddings.
+    # """
+
+    # def __init__(self, input_dim: int = EMB_DIM, 
+    #             hidden_dim: int = 1536,
+    #             num_gt_layers: int = 4, 
+    #             num_heads: int = 8,
+    #             num_edge_types: int = NUM_EDGE_TYPES,
+    #             dropout: float = 0.2,
+    #             include_bert: bool = True,
+    #             num_bert_layers_freeze: int = 8,
+    #             bert_chunk: int = 256):
+
+    #     super().__init__()
+    #     self.hidden_dim = hidden_dim
+    #     self.include_bert = include_bert
+
+    #     self.encoder = SharedEncoder(
+    #         input_dim=input_dim, 
+    #         hidden_dim=hidden_dim,
+    #         num_gt_layers=num_gt_layers, 
+    #         num_heads=num_heads,
+    #         num_edge_types=num_edge_types, 
+    #         dropout=dropout,
+    #         include_bert=include_bert,
+    #         num_bert_layers_freeze=num_bert_layers_freeze,
+    #         bert_chunk=bert_chunk,
+    #     )
+    #     self.ranker = DeletionLineRanker(hidden_dim)
+
+
+    # def predict(self, pyg_data, del_idx: int = 0) -> torch.Tensor:
+    #     """
+    #     Score a single deletion line for inference.
+
+    #     Returns:
+    #         scalar ranking score
+    #     """
+    #     if isinstance(del_idx, torch.Tensor):
+    #         del_idx = del_idx.item() if del_idx.numel() == 1 else del_idx[0].item()
+    #     h = self.encoder.encode_pyg(pyg_data)
+    #     if del_idx >= h.size(0):
+    #         raise ValueError(
+    #             f"del_idx {del_idx} out of bounds for graph with {h.size(0)} nodes")
+    #     # return self.ranker.score(h[del_idx])
+    #     return self.ranker(h[del_idx].unsqueeze(0)).squeeze()
+
+    # def forward(
+    #     self,
+    #     mini_graphs,        # List[MiniGraph]  — all graphs in this batch
+    #     device: torch.device,
+    #     max_nodes: int = 9500,
+    # ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], List[int]]:
+    #     """
+    #     Encode every graph in mini_graphs exactly once, then extract
+    #     deletion-line embeddings for every pair by lookup.
+
+    #     Each deletion line is always node 0 in its subgraph (del_idx=0),
+    #     so we extract h[ptr[i]] — the first node of each graph.
+
+    #     Parameters
+    #     ----------
+    #     mini_graphs : all MiniGraph objects for the test cases in this batch
+    #     pairs       : all DeletionLinePair combinations derived from those graphs
+    #     device      : torch device
+    #     max_nodes   : graphs with more nodes than this are skipped
+
+    #     Returns
+    #     -------
+    #     emb_x      : [N, hidden_dim] left-side embeddings for valid pairs
+    #     emb_y      : [N, hidden_dim] right-side embeddings for valid pairs
+    #     valid_mask : indices into ``pairs`` that were successfully processed
+    #                  (use to align with pair.prob in the caller)
+    #     Returns (None, None, []) when no valid pairs exist.
+    #     """
+
+    #     # ── Step 1: filter oversized graphs, build id→embedding map ──────
+    #     valid_pygs:   List           = []
+    #     valid_indices:   List[int]      = []
+
+    #     for i, mg in enumerate(mini_graphs):
+    #         if mg.pyg is None:
+    #             continue
+
+    #         if mg.pyg.num_nodes > max_nodes:
+    #             continue
+
+    #         valid_pygs.append(mg.pyg.to(device))
+    #         valid_indices.append(i)
+
+    #     if not valid_pygs:
+    #         return None, []
+
+    #     # ── Step 2: single batched encoder forward pass ───────────────────
+    #     batched = Batch.from_data_list(valid_pygs)
+    #     h_all   = self.encoder.encode_pyg(batched)   # [total_nodes, hidden_dim]
+
+    #     # ── Step 3: extract node-0 embedding for each graph ───────────────
+    #     emb_list: List[torch.Tensor] = []
+    #     for i in range(len(valid_pygs)):
+    #         node_start = batched.ptr[i].item()
+    #         emb = h_all[node_start]
+    #         emb_list.append(emb)
+        
+    #     embs = torch.stack(emb_list)
+
+    #     return embs, valid_indices
 
 
 class DeletionLineRanker(nn.Module):
@@ -219,4 +343,3 @@ class DeletionLineRankingModel(nn.Module):
         emb_y = torch.stack(emb_y_list)          # [N, hidden_dim]
 
         return emb_x, emb_y, valid_mask
-

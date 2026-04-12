@@ -11,7 +11,8 @@ from sklearn.model_selection import train_test_split
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-from config import CONFIG
+from config_utils import ConfigManager
+CONFIG = ConfigManager().raw
 from data.dataset import (
     DeletionLineDataset,
     CommitRankingDataset,
@@ -64,16 +65,29 @@ def _parse_args() -> argparse.Namespace:
 
 def _apply_cli(args: argparse.Namespace) -> None:
     """Overwrite CONFIG in-place with any CLI arguments that were provided."""
-    CLI_KEYS = [
-        "phase1_epochs", "phase1_lr", "phase1_bert_lr", "phase1_rest_lr",
-        "phase1_bert_freeze_bottom_layers",  "phase1_patience", "max_graphs_per_batch",
-        "phase2_epochs", "phase2_lr", "phase2_batch_size", "phase2_patience",
-        "hidden_dim", "num_gt_layers", "dropout", "seed", "save_dir",
-    ]
-    for key in CLI_KEYS:
-        val = getattr(args, key, None)
+    # Maps CLI arg name → (section, key_in_section)
+    CLI_MAP = {
+        "phase1_epochs":                     ("phase1", "epochs"),
+        "phase1_lr":                         ("phase1", "lr"),
+        "phase1_bert_lr":                    ("phase1", "bert_lr"),
+        "phase1_rest_lr":                    ("phase1", "rest_lr"),
+        "phase1_bert_freeze_bottom_layers":  ("phase1", "bert_freeze_bottom_layers"),
+        "phase1_patience":                   ("phase1", "patience"),
+        "max_graphs_per_batch":              ("phase1", "max_graphs_per_batch"),
+        "phase2_epochs":                     ("phase2", "epochs"),
+        "phase2_lr":                         ("phase2", "lr"),
+        "phase2_batch_size":                 ("phase2", "batch_size"),
+        "phase2_patience":                   ("phase2", "patience"),
+        "hidden_dim":                        ("model",  "hidden_dim"),
+        "num_gt_layers":                     ("model",  "num_gt_layers"),
+        "dropout":                           ("model",  "dropout"),
+        "seed":                              ("defaults", "seed"),
+        "save_dir":                          ("paths",   "save_dir"),
+    }
+    for cli_key, (section, yaml_key) in CLI_MAP.items():
+        val = getattr(args, cli_key, None)
         if val is not None:
-            CONFIG[key] = val
+            CONFIG.setdefault(section, {})[yaml_key] = val
 
 
 
@@ -88,7 +102,11 @@ def _run_phase1(
     """
     Train Phase 1 or load an existing checkpoint.
     """
-    if skip_p1 and p1_ckpt_path.exists():
+    if skip_p1:
+        if not p1_ckpt_path.exists():
+            raise FileNotFoundError(
+                f"--skip-phase1 was set but checkpoint not found: {p1_ckpt_path}"
+            )
         print(f"\n  Loading Phase 1 checkpoint: {p1_ckpt_path}")
         state = torch.load(p1_ckpt_path, map_location="cpu")["model_state_dict"]
         return {"model_state": state, "loaded_from": str(p1_ckpt_path)}
@@ -99,22 +117,23 @@ def _run_phase1(
     if result is None:
         return None
 
-    ckpt_path = Path(CONFIG["save_dir"]) / "phase1_best.pt"
+    ckpt_path = Path(CONFIG["paths"]["save_dir"]) / "phase1_best.pt"
     torch.save({"model_state_dict": result["model_state"]}, ckpt_path)
     print(f"  ✓ Phase 1 checkpoint saved to {ckpt_path}")
     return result
 
-
-def diagnose_phase1_accuracy(scored, cases, label):
+def diagnose_phase1_accuracy(scored, cases, label, top_k=1):
     correct = sum(
         1 for name in cases
-        if name in scored and scored[name][0].rootcause
+        if name in scored and any(
+            mg.rootcause 
+            for _, mg, _ in scored[name][:top_k]
+        )
     )
     total = sum(1 for name in cases if name in scored)
-    print(f"  Phase 1 top-1 correct ({label}): {correct}/{total} = {correct/max(total,1)*100:.1f}%")
-
-
-
+    print(f"  Phase 1 top-{top_k} correct ({label}): "
+          f"{correct}/{total} = {correct/max(total,1)*100:.1f}%")
+        
 def _prepare_phase2_data(
     p1_state: Dict,
     phase1_dataset: DeletionLineDataset,
@@ -134,7 +153,8 @@ def _prepare_phase2_data(
     print(f"\n  Scoring deletion lines for {len(all_cases)} test cases...")
     scored = score_deletion_lines(
         p1_model, phase1_dataset, all_cases, device,
-        max_nodes=CONFIG.get("max_nodes_per_batch", 4096),
+        max_nodes=CONFIG["defaults"]["max_nodes_per_batch"],
+        top_k=CONFIG["phase2"]["top_k_lines"],
     )
     print(f"  Top graphs selected: {len(scored)}/{len(all_cases)}")
 
@@ -145,7 +165,6 @@ def _prepare_phase2_data(
 
     del p1_model
     gc.collect()
-    # torch.cuda.empty_cache()
 
     print("\n  Building Phase 2 embedding items...")
     p2_items = build_phase2_items(scored, all_cases)
@@ -185,14 +204,14 @@ def _run_phase2(
 
     test_loader = DataLoader(
         Subset(p2_ds, test_idx),
-        batch_size=CONFIG["phase2_batch_size"],
+        batch_size=CONFIG["phase2"]["batch_size"],
         shuffle=False,
         collate_fn=collate_commit_ranking,
         num_workers=0,
     )
     loss_fn = LabelSmoothingRankingLoss(
-        temperature=CONFIG["phase2_temperature"],
-        smoothing=CONFIG["phase2_label_smoothing"],
+        temperature=CONFIG["phase2"]["temperature"],
+        smoothing=CONFIG["phase2"]["label_smoothing"],
     )
 
     _, test_m = _run_epoch(
@@ -230,8 +249,7 @@ def _run(
 
     p1_result = _run_phase1(
         train_cases, val_cases,
-        # phase1_dataset, p1_ckpt_dir / "phase1_best.pt",
-        phase1_dataset, p1_ckpt_dir / "phase1_bestOverfit99trainresults.pt",
+        phase1_dataset, p1_ckpt_dir / "phase1_best.pt",
         skip_p1, device,
     )
     if p1_result is None:
@@ -251,7 +269,7 @@ def _run(
 
     torch.save(
         {"model_state_dict": p2_result["best_commit_ranker_state"]},
-        Path(CONFIG["save_dir"]) / "phase2_bestOverfit99trainresults.pt",
+        Path(CONFIG["paths"]["save_dir"]) / "phase2_best.pt",
     )
 
     del p2_ds
@@ -309,7 +327,7 @@ def _print_and_save(
         "phase2_test_metrics": test_m,
         "best_epoch":          p2_result.get("best_epoch", 0),
     }
-    path = Path(CONFIG["save_dir"]) / "results_summary.json"
+    path = Path(CONFIG["paths"]["save_dir"]) / "results_summary.json"
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"\n✓ Summary saved to {path}")
@@ -320,47 +338,45 @@ def main() -> None:
     args = _parse_args()
     _apply_cli(args)
 
-    set_seed(CONFIG["seed"])
-    os.makedirs(CONFIG["save_dir"], exist_ok=True)
+
+    set_seed(CONFIG["defaults"]["seed"])
+    os.makedirs(CONFIG["paths"]["save_dir"], exist_ok=True)
 
     p1_ckpt_dir = Path(
         args.phase1_checkpoint_dir
         if args.phase1_checkpoint_dir
-        else CONFIG["save_dir"]
+        else CONFIG["paths"]["save_dir"]
     )
 
-    torch.backends.cudnn.benchmark        = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32       = True
-
-    device = setup_device(CONFIG.get("gpu_id", 0))
+    device = setup_device(CONFIG["defaults"]["gpu_id"])
 
     print("=" * 70)
     print("UNIFIED TWO-PHASE TRAINING")
     print(f"  device : {device}")
     print("=" * 70)
 
-    with open(Path(CONFIG["data_path"]) / CONFIG["test_cases_file"]) as f:
+    with open(Path(CONFIG["paths"]["data_root"]) / CONFIG["paths"]["test_cases_file"]) as f:
         all_cases: List[str] = json.load(f)
     print(f"Total test cases: {len(all_cases)}")
 
     # Fixed 70 / 15 / 15 split — seeded for reproducibility
+    seed = CONFIG["defaults"]["seed"]
     train_cases, temp_cases = train_test_split(
-        all_cases, test_size=0.30, random_state=CONFIG["seed"], shuffle=True
+        all_cases, test_size=0.30, random_state=seed, shuffle=True
     )
     val_cases, test_cases = train_test_split(
-        temp_cases, test_size=0.50, random_state=CONFIG["seed"], shuffle=True
+        temp_cases, test_size=0.50, random_state=seed, shuffle=True
     )
 
     n = len(all_cases)
-    print(f"\nData split (seed={CONFIG['seed']}):")
+    print(f"\nData split (seed={seed}):")
     for label, subset in [("Train", train_cases), ("Val", val_cases), ("Test", test_cases)]:
         print(f"  {label:<6}: {len(subset)} cases ({100*len(subset)/n:.1f}%)")
 
     split_info = {
         "total": n, "train": len(train_cases),
         "val": len(val_cases), "test": len(test_cases),
-        "seed": CONFIG["seed"], "strategy": "random_70_15_15",
+        "seed": seed, "strategy": "random_70_15_15",
     }
 
     print("\nInitialising CodeBERT tokenizer...")
@@ -368,12 +384,13 @@ def main() -> None:
 
     print("\nLoading dataset...")
     p1_dataset = DeletionLineDataset(
-        data_path=CONFIG["data_path"],
+        data_path=CONFIG["paths"]["data_root"],
         test_cases=all_cases,
         embedder=embedder,
-        prebuilt_dir=CONFIG["prebuilt_dir"],
+        prebuilt_dir=CONFIG["paths"]["prebuilt_dir"],
     )
 
+    
     p1_r, p2_r = _run(
         train_cases, val_cases, test_cases,
         p1_dataset, p1_ckpt_dir, args.skip_phase1, device,
@@ -381,7 +398,7 @@ def main() -> None:
     if p1_r and p2_r:
         _print_and_save(p1_r, p2_r, split_info)
 
-    print(f"\n✓ All outputs saved to: {CONFIG['save_dir']}")
+    print(f"\n✓ All outputs saved to: {CONFIG['paths']['save_dir']}")
 
 
 if __name__ == "__main__":

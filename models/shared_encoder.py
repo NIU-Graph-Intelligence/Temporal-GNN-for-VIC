@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch_geometric.utils import softmax as pyg_softmax
 from transformers import AutoTokenizer, AutoModel
 
-from config import NUM_EDGE_TYPES
+from data.constants import NUM_EDGE_TYPES
 
 MODEL_NAME = "microsoft/unixcoder-base-nine"
 MAX_LEN = 64

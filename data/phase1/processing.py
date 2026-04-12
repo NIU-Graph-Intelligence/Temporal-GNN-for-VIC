@@ -1,31 +1,22 @@
-"""
-data/phase1/processing.py
-─────────────────────────
-Low-level graph processing helpers for Phase 1 full-graph construction.
-
-  _find_commit_dir        — locate a commit's subdirectory by SHA prefix
-  _find_history_node      — match a V-SZZ history entry to a graph.json node
-  _make_synthetic_node    — create a placeholder node for empty graph.json files
-  _build_cfg_dfg_edges    — build intra-section CFG/DFG/LINEMAP edges
-  _build_pyg              — convert raw nodes+edges into a PyG Data object
-  _build_tp_to_commit     — extract temporal_pos → commit SHA mapping
-  build_full_graph_structure — assemble raw {nodes, edges, temporal_positions}
-                               from V-SZZ data (used by scripts/build_temporal_graphs.py)
-"""
-
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
 from torch_geometric.data import Data
 
-from config import EDGE_TYPES
+from data.constants import EdgeType
+
+logger = logging.getLogger(__name__)
+
+# Minimum prefix length used for fuzzy code matching
+CODE_PREFIX_MATCH_LEN = 20
 
 
-# Filesystem helpers 
+# Filesystem helpers
 
-def _find_commit_dir(test_dir: Path, commit_sha: str) -> Optional[Path]:
+def find_commit_dir(test_dir: Path, commit_sha: str) -> Optional[Path]:
     """Return the subdirectory whose name starts with the first 12 chars of SHA."""
     prefix = commit_sha[:12]
     for d in test_dir.iterdir():
@@ -34,9 +25,8 @@ def _find_commit_dir(test_dir: Path, commit_sha: str) -> Optional[Path]:
     return None
 
 
-#  Node matching 
-
-def _find_history_node(
+#  Node matching
+def find_history_node(
     hist_graph_nodes: List[Dict], hist_entry: Dict
 ) -> Optional[int]:
     """
@@ -55,7 +45,8 @@ def _find_history_node(
             lb, le = n.get("lineBeg", -1), n.get("lineEnd", -1)
             if lb <= target_line <= le:
                 nc = n.get("code", "")
-                if target_code[:20] in nc or nc[:20] in target_code:
+                if (target_code[:CODE_PREFIX_MATCH_LEN] in nc
+                        or nc[:CODE_PREFIX_MATCH_LEN] in target_code):
                     return i
 
     if target_line is not None:
@@ -66,13 +57,14 @@ def _find_history_node(
     if target_code:
         for i, n in enumerate(hist_graph_nodes):
             nc = n.get("code", "")
-            if target_code[:20] in nc or nc[:20] in target_code:
+            if (target_code[:CODE_PREFIX_MATCH_LEN] in nc
+                    or nc[:CODE_PREFIX_MATCH_LEN] in target_code):
                 return i
 
     return None
 
 
-def _make_synthetic_node(hist_entry: Dict) -> Dict:
+def make_synthetic_node(hist_entry: Dict) -> Dict:
     """
     Minimal graph.json-style node from a V-SZZ history entry.
 
@@ -93,7 +85,7 @@ def _make_synthetic_node(hist_entry: Dict) -> Dict:
 
 #  Edge construction
 
-def _build_cfg_dfg_edges(
+def build_cfg_dfg_edges(
     subgraph_nodes: List[Dict], section_start: int, section_end: int
 ) -> List[tuple]:
     """
@@ -109,28 +101,28 @@ def _build_cfg_dfg_edges(
         for cfg_t in node.get("cfgs", []):
             target = section_start + cfg_t
             if section_start <= target < section_end:
-                edges.append((i, target, EDGE_TYPES["CFG_FWD"]))
-                edges.append((target, i, EDGE_TYPES["CFG_BWD"]))
+                edges.append((i, target, EdgeType.CFG_FWD))
+                edges.append((target, i, EdgeType.CFG_BWD))
 
         for dfg_t in node.get("dfgs", []):
             target = section_start + dfg_t
             if section_start <= target < section_end:
-                edges.append((i, target, EDGE_TYPES["DFG_FWD"]))
-                edges.append((target, i, EDGE_TYPES["DFG_BWD"]))
+                edges.append((i, target, EdgeType.DFG_FWD))
+                edges.append((target, i, EdgeType.DFG_BWD))
 
         lmi = node.get("lineMapIndex", -1)
         if lmi != -1:
             target = section_start + lmi
             if section_start <= target < section_end:
-                edges.append((i, target, EDGE_TYPES["LINEMAP"]))
-                edges.append((target, i, EDGE_TYPES["LINEMAP"]))
+                edges.append((i, target, EdgeType.LINEMAP))
+                edges.append((target, i, EdgeType.LINEMAP))
 
     return edges
 
 
 # PyG conversion 
 
-def _build_pyg(
+def build_pyg(
     nodes: List[Dict],
     edges: List[tuple],
     temporal_positions: List[int],
@@ -186,7 +178,7 @@ def _build_pyg(
 
 #  Metadata extraction
 
-def _build_tp_to_commit(
+def build_tp_to_commit(
     nodes: List[Dict], temporal_positions: List[int]
 ) -> Dict[int, str]:
     """
@@ -205,17 +197,18 @@ def _build_tp_to_commit(
     return tp_map
 
 
+# Full-graph assembly
 
 def build_full_graph_structure(
     all_nodes: List[Dict],
     del_node_idx: int,
     test_name: str,
     data_path: Path,
-) -> Optional[Dict]:
+) -> Dict:
     """
     Build the raw full-graph structure for one deletion line.
 
-    Called by ``scripts/build_temporal_graphs.py`` to produce the
+    Called by ``build_temporal_graphs.py`` to produce the
     ``del_*.json`` files that ``DeletionLineDataset`` loads at training time.
 
     Layout
@@ -229,7 +222,7 @@ def build_full_graph_structure(
     CFG/DFG/LINEMAP  — intra-section (within each history graph)
     TEMPORAL_FWD/BWD — per chain: deletion node -> C1 match -> C2 match ...
 
-    Returns {nodes, edges, temporal_positions} or None.
+    Returns {nodes, edges, temporal_positions}.
     """
     del_node = all_nodes[del_node_idx]
     test_dir = data_path / test_name
@@ -239,6 +232,14 @@ def build_full_graph_structure(
     section_starts:     List[int]       = [0]
     temporal_chains:    List[List[int]] = []
 
+    def _add_synthetic(entry, tp):
+        """Insert a synthetic node and return its global index."""
+        idx = len(subgraph_nodes)
+        section_starts.append(idx)
+        subgraph_nodes.append(make_synthetic_node(entry))
+        temporal_positions.append(tp)
+        return idx
+
     for chain in del_node.get("history_chains", []):
         chain_globals: List[int] = []
 
@@ -246,28 +247,37 @@ def build_full_graph_structure(
             commit_sha = hist_entry.get("commit", "")
             temp_pos   = hist_idx + 1
 
-            commit_dir = _find_commit_dir(test_dir, commit_sha)
-
+            commit_dir = find_commit_dir(test_dir, commit_sha)
+            if commit_dir is None:
+                logger.debug(
+                    "Commit dir not found for %s (SHA: %s) — using synthetic node",
+                    test_name, commit_sha[:12],
+                )
+                chain_globals.append(_add_synthetic(hist_entry, temp_pos))
+                continue
             graph_path = commit_dir / "graph.json"
-            
+
             try:
                 with open(graph_path) as f:
                     hist_nodes = json.load(f)
-            except Exception as e:
-                print(f"  [processing] Error reading {graph_path}: {e}")
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.debug(
+                    "Error reading %s — using synthetic node: %s",
+                    graph_path, exc,
+                )
+                chain_globals.append(_add_synthetic(hist_entry, temp_pos))
+                continue
+
+            if not hist_nodes:
+                chain_globals.append(_add_synthetic(hist_entry, temp_pos))
                 continue
 
             sec_start = len(subgraph_nodes)
             section_starts.append(sec_start)
 
-            if not hist_nodes:
-                # Empty graph.json — insert a synthetic node to preserve chain
-                subgraph_nodes.append(_make_synthetic_node(hist_entry))
-                temporal_positions.append(temp_pos)
-                chain_globals.append(sec_start)
-                continue
-
-            matched_idx = _find_history_node(hist_nodes, hist_entry) or 0
+            matched_idx = find_history_node(hist_nodes, hist_entry)
+            if matched_idx is None:
+                matched_idx = 0
             chain_globals.append(sec_start + matched_idx)
             for node in hist_nodes:
                 subgraph_nodes.append(node)
@@ -282,19 +292,18 @@ def build_full_graph_structure(
     for chain_globals in temporal_chains:
         prev = 0
         for g_idx in chain_globals:
-            edges.append((prev, g_idx, EDGE_TYPES["TEMPORAL_FWD"]))
-            edges.append((g_idx, prev, EDGE_TYPES["TEMPORAL_BWD"]))
+            edges.append((prev, g_idx, EdgeType.TEMPORAL_FWD))
+            edges.append((g_idx, prev, EdgeType.TEMPORAL_BWD))
             prev = g_idx
 
     for s_idx in range(1, len(section_starts)):
         s_start = section_starts[s_idx]
         s_end   = (section_starts[s_idx + 1]
                    if s_idx + 1 < len(section_starts) else num_nodes)
-        edges.extend(_build_cfg_dfg_edges(subgraph_nodes, s_start, s_end))
+        edges.extend(build_cfg_dfg_edges(subgraph_nodes, s_start, s_end))
 
     return {
         "nodes":              subgraph_nodes,
         "edges":              edges,
         "temporal_positions": temporal_positions,
     }
-

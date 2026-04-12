@@ -21,6 +21,8 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from models.shared_encoder import sinusoidal_pe
+import math
 
 
 class CommitRankingModule(nn.Module):
@@ -33,7 +35,8 @@ class CommitRankingModule(nn.Module):
         hidden_dim: int = 256,
         num_heads: int = 4,
         num_commit_transformer_layers: int = 1,
-        dropout: float = 0.3
+        dropout: float = 0.3,
+        max_temporal_dist: int = 300,
     ):
 
         super().__init__()
@@ -56,12 +59,17 @@ class CommitRankingModule(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # Multi-head attention pooling (nodes → one vector per commit)
-        self.commit_queries = nn.Parameter(torch.randn(num_heads, self.head_dim))
+        self.temporal_query = nn.Parameter(torch.randn(num_heads, self.head_dim))
+        self.general_query = nn.Parameter(torch.randn(num_heads, self.head_dim))
+
+
         self.k_proj = nn.Linear(hidden_dim, hidden_dim)
         self.v_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj_pool = nn.Linear(hidden_dim, hidden_dim)
         self.norm_pool = nn.LayerNorm(hidden_dim)
+
+        # self.distance_embedding = nn.Embedding(max_temporal_dist, hidden_dim)
+
 
         # Commit-level Transformer
         self.commit_transformer = nn.TransformerEncoder(
@@ -72,6 +80,7 @@ class CommitRankingModule(nn.Module):
             ),
             num_layers=num_commit_transformer_layers,
         )
+        
 
         # Final Ranking head
         self.ranking_head = nn.Sequential(
@@ -81,9 +90,12 @@ class CommitRankingModule(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
         )
 
+
+
     def forward(self, 
                 node_embeddings: torch.Tensor,
                 commit_indices: torch.Tensor,
+                is_temporal_node: torch.Tensor
         ) -> torch.Tensor:
         """
         Args:
@@ -98,16 +110,22 @@ class CommitRankingModule(nn.Module):
 
         # node_embeddings: [N, input_dim] → [N, hidden_dim]
         node_embeddings = self.input_proj(node_embeddings)
-
+       
         # Project all nodes to keys and values in one pass
         K_all = self.k_proj(node_embeddings).view(N, self.num_heads, self.head_dim) # [N, H, D_h]
         V_all = self.v_proj(node_embeddings).view(N, self.num_heads, self.head_dim) # [N, H, D_h]
 
-        # Attention logits
-        # → logits: [N, H]  (one logit per node-head pair)
-        logits = torch.einsum( "hd,nhd->nh", self.commit_queries, K_all) * self.scale  
 
-        # Subtracting the global max across all N nodes is a valid stability
+        # temporal_query: [H, D_h], general_query: [H, D_h]
+        # is_temporal_node: [N] bool -> expand to [N, H, D_h]
+        mask = is_temporal_node.view(N,1,1).expand(N, self.num_heads, self.head_dim)
+        queries = torch.where(mask, self.temporal_query.unsqueeze(0).expand(N, -1, -1),
+                                self.general_query.unsqueeze(0).expand(N, -1, -1)
+                            ) # [N, H, D_h]
+
+        # Attention logits using per-node query
+        logits = (queries * K_all).sum(dim=-1) * self.scale # [N, H]
+ 
         idx = commit_indices.unsqueeze(1).expand_as(logits)  # [N, H]
 
         logits_stable = logits - logits.max().detach()        
@@ -137,7 +155,7 @@ class CommitRankingModule(nn.Module):
         # then linear projection + LayerNorm
         commit_embeddings = self.norm_pool(self.out_proj_pool(pooled.reshape(num_commits, -1))) # [C, hidden_dim]
 
-        # Commit transformer + ranking head
+        # Transformer + ranking head
         x = commit_embeddings.unsqueeze(1)         # [C, 1, D] (seq, batch, dim)
         x = self.commit_transformer(x).squeeze(1)  # [C, D]
         return self.ranking_head(x).squeeze(-1)     # [C]

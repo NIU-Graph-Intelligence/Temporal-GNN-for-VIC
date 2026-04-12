@@ -7,7 +7,7 @@ primitives for Phase 1 ranking.
 
 import random
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List
 
 from data.phase1.minigraph import MiniGraph
 
@@ -52,7 +52,6 @@ def build_pairs(
 
     graphs_ordered = pos + neg
     pairs = []
-    cnt = 0
 
     for i in range(len(graphs_ordered)):
         for j in range(i+1, len(graphs_ordered)):
@@ -66,9 +65,8 @@ def build_pairs(
                 prob = 0.0
 
             pairs.append(DeletionLinePair(g1, g2, prob))
-            cnt += 1
 
-            if cnt >= max_pairs:
+            if len(pairs) >= max_pairs:
                 return pairs
     return pairs
 
@@ -76,24 +74,17 @@ def build_pairs(
 def combine_testcases_to_batches(
     dataset,                          # DeletionLineDataset
     cases: List[str],
-    max_pairs:            int = 100,
+    pairs_cache: Dict[str, List[DeletionLinePair]],
     max_graphs_per_batch: int = 40,   # VRAM control: max graphs encoded at once
 ) -> List[TestCaseBatch]:
     """
     Group test cases into TestCaseBatches capped by ``max_graphs_per_batch``.
-    Each test case contributes len(mini_graphs[name]) graphs. Once adding
-    the next test case would exceed ``max_graphs_per_batch``, the current
-    batch is sealed and a new one starts.
-
-    A single test case that exceeds ``max_graphs_per_batch`` on its own is
-    placed in a batch by itself (handled gracefully — the encoder will just
-    have a large-ish batch for that one case).
 
     Parameters
     ----------
     dataset              : DeletionLineDataset (provides mini_graphs dict)
     cases                : ordered list of test-case names to batch
-    max_pairs            : passed to build_pairs for within-testcase pair cap
+    pairs_cache          : pre-built {test_name: List[DeletionLinePair]}
     max_graphs_per_batch : maximum number of graphs encoded in one forward pass
     """
     batches: List[TestCaseBatch] = []
@@ -119,7 +110,7 @@ def combine_testcases_to_batches(
 
         current_cases.append(name)
         current_graphs.extend(mgs)
-        current_pairs.extend(build_pairs(mgs, max_pairs))
+        current_pairs.extend(pairs_cache.get(name, []))
 
     # Don't forget the last batch
     if current_graphs:

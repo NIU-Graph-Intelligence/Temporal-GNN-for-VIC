@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 import torch
 
 from data.dataset import DeletionLineDataset
-from data.phase1.pairs import combine_testcases_to_batches
+from data.phase1.pairs import combine_testcases_to_batches, build_pairs
 from training.evaluation import evaluate_ranking, load_true_commit_map
 from training.loss import PairwiseRankingLoss
 from training.utils import (
@@ -65,16 +65,24 @@ class Phase1Trainer:
         ds  = self.dataset
         print(f"  PHASE 1 — Fold {fold_idx + 1}: Deletion Line Ranking")
 
-        val_cid = load_true_commit_map(val_cases, cfg["data_path"])
+        val_cid = load_true_commit_map(val_cases, cfg["paths"]["data_root"])
         print(f"  Val inducing commits: {sum(len(v) for v in val_cid.values())}")
 
         # Count pairs for logging only (pairs are now built inside batches)
-        max_pairs = cfg["phase1_max_pairs_per_test"]
+        max_pairs = cfg["phase1"]["max_pairs_per_test"]
+        
+        # Pre-build pairs cache to avoid recreating them every epoch
+        pairs_cache: Dict[str, List] = {}
+        for tc in set(train_cases + val_cases):
+            mgs = ds.mini_graphs.get(tc, [])
+            if mgs:
+                pairs_cache[tc] = build_pairs(mgs, max_pairs)
+
         n_train_pairs = sum(
-            len(ds.mini_graphs.get(n, [])) for n in train_cases
+            len(pairs_cache.get(n, [])) for n in train_cases
         )
         n_val_pairs = sum(
-            len(ds.mini_graphs.get(n, [])) for n in val_cases
+            len(pairs_cache.get(n, [])) for n in val_cases
         )
         print(f"  Train graphs: {n_train_pairs} | Val graphs: {n_val_pairs}")
         print(f"  Max pairs per test case: {max_pairs}")
@@ -93,9 +101,9 @@ class Phase1Trainer:
             self.optimizer, mode="max", factor=0.5, patience=5
         )
 
-        stopper  = EarlyStopping(patience=cfg["phase1_patience"], mode="max")
-        max_gpb  = cfg.get("max_graphs_per_batch", 32)   # VRAM knob
-        max_n    = cfg.get("max_nodes_per_graph",  9500)
+        stopper  = EarlyStopping(patience=cfg["phase1"]["patience"], mode="max")
+        max_gpb  = cfg["phase1"].get("max_graphs_per_batch", 32)   # VRAM knob
+        max_n    = cfg["model"].get("max_nodes_per_graph",  9500)
 
         best_f1, best_epoch        = 0.0, 0
         best_state:   Optional[Dict] = None
@@ -105,9 +113,9 @@ class Phase1Trainer:
             "train_f1@1": [], "val_f1@1": [],
         }
 
-        for epoch in range(1, cfg["phase1_epochs"] + 1):
-            tr_loss = self._train_epoch(train_cases, max_pairs, max_gpb, max_n)
-            vl_loss = self._validate_epoch(val_cases,  max_pairs, max_gpb, max_n)
+        for epoch in range(1, cfg["phase1"]["epochs"] + 1):
+            tr_loss = self._train_epoch(train_cases, pairs_cache, max_gpb, max_n)
+            vl_loss = self._validate_epoch(val_cases, pairs_cache, max_gpb, max_n)
             val_m   = self._evaluate(ds, val_cases)
 
             f1 = val_m.get("f1@1", 0.0)
@@ -157,7 +165,7 @@ class Phase1Trainer:
     def _train_epoch(
         self,
         cases:             List[str],
-        max_pairs:         int,
+        pairs_cache:       Dict[str, List],
         max_graphs_per_batch: int,
         max_nodes:         int,
     ) -> float:
@@ -167,7 +175,7 @@ class Phase1Trainer:
             cases=cases,
             criterion=self.criterion,
             optimizer=self.optimizer,
-            max_pairs=max_pairs,
+            pairs_cache=pairs_cache,
             max_graphs_per_batch=max_graphs_per_batch,
             max_nodes=max_nodes,
             device=self.device,
@@ -177,7 +185,7 @@ class Phase1Trainer:
     def _validate_epoch(
         self,
         cases:             List[str],
-        max_pairs:         int,
+        pairs_cache:       Dict[str, List],
         max_graphs_per_batch: int,
         max_nodes:         int,
     ) -> float:
@@ -187,7 +195,7 @@ class Phase1Trainer:
             cases=cases,
             criterion=self.criterion,
             optimizer=None,
-            max_pairs=max_pairs,
+            pairs_cache=pairs_cache,
             max_graphs_per_batch=max_graphs_per_batch,
             max_nodes=max_nodes,
             device=self.device,
@@ -196,7 +204,7 @@ class Phase1Trainer:
 
     def _evaluate(self, dataset: DeletionLineDataset, test_cases: List[str]) -> Dict:
         return evaluate_ranking(
-            self.model, dataset, test_cases, self.config["data_path"],
+            self.model, dataset, test_cases, self.config["paths"]["data_root"],
             device=self.device,
         )
 
@@ -220,7 +228,7 @@ def _run_epoch(
     cases:                List[str],
     criterion,
     optimizer,
-    max_pairs:            int,
+    pairs_cache:          Dict[str, List],
     max_graphs_per_batch: int,
     max_nodes:            int,
     device:               torch.device,
@@ -252,7 +260,7 @@ def _run_epoch(
     batches = combine_testcases_to_batches(
         dataset=dataset,
         cases=cases,
-        max_pairs=max_pairs,
+        pairs_cache=pairs_cache,
         max_graphs_per_batch=max_graphs_per_batch,
     )
 

@@ -1,23 +1,25 @@
 """
-data/phase1/dataset.py
-──────────────────────
+data/dataset.py
+───────────────
 DeletionLineDataset — loads pre-built Phase 1 graphs for training and evaluation.
 
-The graph structure is assembled offline by ``scripts/build_temporal_graphs.py``
+The graph structure is assembled by ``build_temporal_graphs.py``
 (which calls ``data.phase1.processing.build_full_graph_structure``).
 This file only handles loading those pre-built files and embedding them.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 import torch
 from torch.utils.data import Dataset
 
 from data.phase1.minigraph import MiniGraph
-from data.phase1.pairs import DeletionLinePair, build_pairs
-from data.phase1.processing import _build_pyg, _build_tp_to_commit
+from data.phase1.processing import build_pyg, build_tp_to_commit
 
 
 class DeletionLineDataset:
@@ -30,7 +32,7 @@ class DeletionLineDataset:
        ``del_*.json`` files under ``prebuilt_dir/full_graph/<test_name>/``.
     2. On the first training run, ``DeletionLineDataset`` reads each JSON,
        embeds nodes with CodeBERT, and writes a ``.pt`` cache alongside it.
-    3. All subsequent runs load directly from the ``.pt`` caches — fast RAM-only.
+    3. All subsequent runs load directly from the ``.pt`` caches.
 
     Parameters
     ----------
@@ -61,10 +63,6 @@ class DeletionLineDataset:
     def _load_from_prebuilt(self) -> None:
         """
         Load all graphs from pre-built JSON files, using .pt caches.
-
-        Cache versioning: if the embedder uses tokenize_texts (v2 format) but
-        only v1 caches exist (with pre-computed ``x`` tensors), old caches are
-        cleared automatically and regenerated.
         """
         mode_dir = self.prebuilt_dir / "full_graph"
 
@@ -74,25 +72,6 @@ class DeletionLineDataset:
                 f"Run:  python scripts/build_temporal_graphs.py"
             )
 
-        # Invalidate v1 caches when switching to tokenizer-only (v2) format
-        if getattr(self.embedder, "tokenizer_only", False):
-            sentinel = mode_dir / ".cache_format_v2"
-            if not sentinel.exists():
-                import glob as _glob
-                old_pts = _glob.glob(str(mode_dir / "**" / "*.pt"), recursive=True)
-                if old_pts:
-                    print(f"  Clearing {len(old_pts)} stale embedding caches "
-                          f"(switching to tokenized format)...")
-                    for p in old_pts:
-                        try:
-                            Path(p).unlink()
-                        except OSError:
-                            pass
-                try:
-                    sentinel.parent.mkdir(parents=True, exist_ok=True)
-                    sentinel.touch()
-                except OSError:
-                    pass
 
         total, skipped = 0, 0
 
@@ -131,6 +110,7 @@ class DeletionLineDataset:
 
         if cache_path.exists():
             try:
+                # weights_only=False required: cache contains PyG Data objects (pickled)
                 cached          = torch.load(cache_path, map_location="cpu")
                 mg              = MiniGraph([], cached["pyg"], test_name,
                                             cached.get("del_idx", 0))
@@ -140,34 +120,15 @@ class DeletionLineDataset:
                 mg.del_line_beg   = cached.get("del_line_beg")
                 mg.del_code       = cached.get("del_code")
 
-                if mg.history_chains is not None:
-                    return mg
-
-                # Old cache format — backfill from JSON and re-save
-                with open(json_path) as f:
-                    data = json.load(f)
-                nodes = data.get("nodes", [])
-                if nodes:
-                    mg.history_chains = nodes[0].get("history_chains", [])
-                    mg.del_line_beg   = nodes[0].get("lineBeg", 0)
-                    mg.del_code       = nodes[0].get("code", "")
-                    cached["history_chains"] = mg.history_chains
-                    cached["del_line_beg"]   = mg.del_line_beg
-                    cached["del_code"]       = mg.del_code
-                    try:
-                        torch.save(cached, cache_path)
-                    except Exception:
-                        pass
-                else:
-                    mg.history_chains = []
                 return mg
-            except Exception:
-                pass  # corrupt cache — fall through and rebuild
+            except Exception as exc:
+                logger.debug("Corrupt cache %s, rebuilding: %s", cache_path, exc)
 
         try:
             with open(json_path) as f:
                 data = json.load(f)
-        except Exception:
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to read %s: %s", json_path, exc)
             return None
 
         nodes              = data.get("nodes", [])
@@ -176,13 +137,13 @@ class DeletionLineDataset:
         if not nodes:
             return None
 
-        pyg = _build_pyg(nodes, edges, temporal_positions, self.embedder)
+        pyg = build_pyg(nodes, edges, temporal_positions, self.embedder)
         if pyg is None:
             return None
 
         rootcause      = data.get("rootcause", False)
         del_idx_val    = data.get("del_idx", 0)
-        tp_to_commit   = _build_tp_to_commit(nodes, temporal_positions)
+        tp_to_commit   = build_tp_to_commit(nodes, temporal_positions)
         history_chains = nodes[0].get("history_chains", [])
         del_line_beg   = nodes[0].get("lineBeg", 0)
         del_code       = nodes[0].get("code", "")
@@ -195,8 +156,8 @@ class DeletionLineDataset:
                  "del_line_beg": del_line_beg, "del_code": del_code},
                 cache_path,
             )
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.debug("Failed to write cache %s: %s", cache_path, exc)
 
         mg                = MiniGraph(nodes, pyg, test_name, del_idx_val)
         mg.rootcause      = rootcause
@@ -208,27 +169,6 @@ class DeletionLineDataset:
 
     def get_mini_graphs_dict(self) -> Dict[str, List[MiniGraph]]:
         return self.mini_graphs
-
-    def get_test_cases(self) -> List[str]:
-        return list(self.mini_graphs.keys())
-
-    def get_all_pairs(self, max_pairs_per_test: int = 50) -> List[DeletionLinePair]:
-        """Generate pairwise training examples across all test cases."""
-        all_pairs: List[DeletionLinePair] = []
-        for graphs in self.mini_graphs.values():
-            all_pairs.extend(build_pairs(graphs, max_pairs_per_test))
-        return all_pairs
-
-    def get_pairs_for_cases(
-        self, test_cases: List[str], max_pairs_per_test: int = 50,
-    ) -> List[DeletionLinePair]:
-        """Generate pairwise training examples for a subset of test cases."""
-        all_pairs: List[DeletionLinePair] = []
-        for name in test_cases:
-            if name in self.mini_graphs:
-                all_pairs.extend(build_pairs(self.mini_graphs[name],
-                                             max_pairs_per_test))
-        return all_pairs
 
     def _populate_inducing_commits(self) -> None:
         """
@@ -275,7 +215,11 @@ def collate_commit_ranking(batch: List[Dict]) -> Optional[Dict]:
     """
     valid = [
         item for item in batch
-        if item.get("valid", False) and item.get("node_embeddings") is not None
+        if item.get("valid", False)
+        and item.get("node_embeddings") is not None
+        and item.get("commit_indices") is not None
+        and item["commit_indices"].numel() > 0
+        and item["node_embeddings"].numel() > 0
     ]
     if not valid:
         return None
@@ -283,6 +227,7 @@ def collate_commit_ranking(batch: List[Dict]) -> Optional[Dict]:
     offset          = 0
     all_embeddings: List[torch.Tensor] = []
     all_indices:    List[torch.Tensor] = []
+    all_temporal_mask: List[torch.Tensor] = []
     commit_counts:  List[int]          = []
     gt_positions:   List[List[int]]    = []
 
@@ -291,6 +236,7 @@ def collate_commit_ranking(batch: List[Dict]) -> Optional[Dict]:
         n_commits = int(ci.max().item()) + 1
         all_embeddings.append(item["node_embeddings"])
         all_indices.append(ci + offset)
+        all_temporal_mask.append(item["is_temporal_node"])
         commit_counts.append(n_commits)
         gt_positions.append(item["ground_truth_positions"])
         offset += n_commits
@@ -298,6 +244,7 @@ def collate_commit_ranking(batch: List[Dict]) -> Optional[Dict]:
     return {
         "node_embeddings":        torch.cat(all_embeddings, dim=0),
         "commit_indices":         torch.cat(all_indices,    dim=0),
+        "is_temporal_node":       torch.cat(all_temporal_mask, dim=0),
         "commit_counts":          commit_counts,
         "ground_truth_positions": gt_positions,
     }

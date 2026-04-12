@@ -1,6 +1,6 @@
 """
-data/minigraph.py
-─────────────────
+data/phase1/minigraph.py
+────────────────────────
 MiniGraph — one deletion line with its full-graph PyG context.
 """
 
@@ -20,6 +20,7 @@ class MiniGraph:
 
     Attributes
     ----------
+    g                : raw graph data list (may be empty when loaded from .pt cache)
     pyg              : PyG Data object (node features + edges)
     tp_to_commit     : {int(temporal_pos): str(12-char commit SHA)}
     inducing_commits : set[str] — ground-truth inducing SHAs from info.json
@@ -38,6 +39,7 @@ class MiniGraph:
         test_name: str = "",
         del_idx: int = 0,
     ) -> None:
+        # Raw graph data list — may be empty when loaded from .pt cache
         self.g                = graph_data
         self.pyg              = pyg_data
         self.test_name        = test_name
@@ -53,3 +55,10 @@ class MiniGraph:
         self.history_chains:   List[Dict]     = []
         self.del_line_beg:     int            = 0
         self.del_code:         str            = ""
+
+    def __repr__(self) -> str:
+        return (
+            f"MiniGraph(test={self.test_name!r}, "
+            f"del_idx={self.del_idx.item()}, "
+            f"rootcause={self.rootcause})"
+        )

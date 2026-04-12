@@ -7,7 +7,7 @@ Public API for both training phases.
   Dataset classes            →  data.dataset (DeletionLineDataset, CommitRankingDataset)
 """
 
-from config import EDGE_TYPES, NUM_EDGE_TYPES
+from data.constants import EdgeType, NUM_EDGE_TYPES
 
 # Phase 1 graph structures
 from .phase1 import (
@@ -27,7 +27,7 @@ from .dataset import (
 )
 
 __all__ = [
-    "EDGE_TYPES",
+    "EdgeType",
     "NUM_EDGE_TYPES",
     # phase 1 graph structures
     "MiniGraph",

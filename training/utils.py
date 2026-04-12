@@ -115,7 +115,7 @@ def compute_metrics(scores: torch.Tensor, ground_truth_positions: List[int],
 
     ranked = torch.argsort(scores, descending=True).tolist()
     gt_set = set(ground_truth_positions)
-    result = {"num_gt": len(gt_set)}
+    result = {"num_gt": 1}
 
     for k in k_values:
         hit = bool(set(ranked[:k]) & gt_set)
@@ -193,18 +193,18 @@ def clip_and_step(model: nn.Module, optimizer) -> None:
 def build_phase1_model(config: Dict, device: torch.device):
     """Construct a :class:`DeletionLineRankingModel` from *config*."""
     from models.phase1_model import DeletionLineRankingModel
-    from config import NUM_EDGE_TYPES
+    from data.constants import NUM_EDGE_TYPES
 
     return DeletionLineRankingModel(
         input_dim=config.get("emb_dim", 768),
-        hidden_dim=config["hidden_dim"],
-        num_gt_layers=config["num_gt_layers"],
-        num_heads=config["num_heads"],
-        num_edge_types=config.get("num_edge_types") or NUM_EDGE_TYPES,
-        dropout=config.get("phase1_dropout", config["dropout"]),
-        include_bert=config.get("include_bert", True),
-        num_bert_layers_freeze=config.get("phase1_bert_freeze_bottom_layers", 0),
-        bert_chunk=config.get("bert_chunk", 256),
+        hidden_dim=config["model"]["hidden_dim"],
+        num_gt_layers=config["model"]["num_gt_layers"],
+        num_heads=config["model"]["num_heads"],
+        num_edge_types=NUM_EDGE_TYPES,
+        dropout=config["phase1"].get("dropout", config["model"]["dropout"]),
+        include_bert=config["model"].get("include_bert", True),
+        num_bert_layers_freeze=config["phase1"].get("bert_freeze_bottom_layers", 0),
+        bert_chunk=config["model"].get("bert_chunk", 256),
     ).to(device)
 
 
@@ -212,12 +212,14 @@ def build_phase2_model(config: Dict, device: torch.device):
     """Construct a :class:`CommitRankingModule` from *config*."""
     from models.phase2_model import CommitRankingModule
 
+    # torch.manual_seed(config["defaults"]["seed"])
     return CommitRankingModule(
-        input_dim=config["hidden_dim"],
-        hidden_dim=config["phase2_hidden_dim"],
-        num_heads=config.get("phase2_num_heads", 4),
-        num_commit_transformer_layers=config["num_commit_transformer_layers"],
-        dropout=config["dropout"],
+        input_dim=config["model"]["hidden_dim"],
+        hidden_dim=config["phase2"]["hidden_dim"],
+        num_heads=config["phase2"].get("num_heads", 4),
+        num_commit_transformer_layers=config["phase2"]["num_commit_transformer_layers"],
+        dropout=config["model"]["dropout"],
+        max_temporal_dist=config["phase2"].get("max_temporal_dist", 50),
     ).to(device)
 
 
@@ -230,10 +232,10 @@ def build_phase1_optimizer(model, config: Dict) -> torch.optim.Optimizer:
     Falls back to a single param group when BERT is disabled or no
     differential LRs are configured.
     """
-    include_bert = config.get("include_bert", True)
-    bert_lr      = config.get("phase1_bert_lr")
-    rest_lr      = config.get("phase1_rest_lr")
-    fallback     = config["phase1_lr"]
+    include_bert = config["model"].get("include_bert", True)
+    bert_lr      = config["phase1"].get("bert_lr")
+    rest_lr      = config["phase1"].get("rest_lr")
+    fallback     = config["phase1"]["lr"]
 
     if not include_bert or (bert_lr is None and rest_lr is None):
         return torch.optim.Adam(

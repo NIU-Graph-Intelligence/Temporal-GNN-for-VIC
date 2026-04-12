@@ -1,0 +1,60 @@
+# All paths are relative to the project root (directory containing this file).
+
+paths:
+  data_root: "trainData"
+  test_cases_file: "successfultestcase627foundGT.json"   # relative to data_root
+  prebuilt_dir: "temporal_graph"
+  save_dir: "checkpoints_testcases_627"
+  graph_mode: "full_graph"
+
+# Phase 1: Deletion-line ranking
+phase1:
+  epochs: 20
+  lr: 0.000005
+  bert_lr: 0.00002
+  rest_lr: 0.0001
+  bert_freeze_bottom_layers: 8
+  patience: 10
+  max_pairs_per_test: 150
+  dropout: 0.3
+  max_graphs_per_batch: 41
+  focal_gamma: 2.0
+
+# Phase 2: Commit ranking
+phase2:
+  epochs: 100
+  lr: 0.0001
+  weight_decay: 0.01
+  batch_size: 16
+  patience: 25
+  gradient_accumulation_steps: 2
+  temperature: 0.1
+  label_smoothing: 0.05
+  top_k_lines: 3
+  focal_gamma: 2
+  focal_alpha: 1
+  margin: 0.5
+  margin_weight: 1.0
+  hidden_dim: 96
+  num_heads: 4
+  num_commit_transformer_layers: 1
+  max_commits: 50
+  max_temporal_dist: 300
+
+# Shared model architecture
+model:
+  hidden_dim: 768
+  num_gt_layers: 2
+  num_heads: 4
+  dropout: 0.1
+  include_bert: true
+  max_nodes_per_graph: 9500
+  bert_chunk: 64
+
+# Defaults
+defaults:
+  seed: 123
+  gpu_id: 0
+  num_workers: 4
+  max_nodes_per_batch: 4096
+  log_interval: 20

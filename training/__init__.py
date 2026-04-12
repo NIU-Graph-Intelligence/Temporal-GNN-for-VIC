@@ -1,6 +1,6 @@
 """training — loss functions, metrics, utilities, and per-phase trainers."""
 
-from .loss import PairwiseRankingLoss, LabelSmoothingRankingLoss
+from .loss import PairwiseRankingLoss, LabelSmoothingRankingLoss, FocalListWiseRankingLoss
 from .evaluation import (
     load_true_commit_map,
     evaluate_top1_metrics,
@@ -28,6 +28,7 @@ from .phase2_trainer import train_phase2_fold
 __all__ = [
     "PairwiseRankingLoss",
     "LabelSmoothingRankingLoss",
+    "FocalListWiseRankingLoss",
     "load_true_commit_map",
     "evaluate_top1_metrics",
     "evaluate_topk_metrics",
