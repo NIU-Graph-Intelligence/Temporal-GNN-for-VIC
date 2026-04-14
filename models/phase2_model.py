@@ -16,13 +16,13 @@ Pre-computed node embeddings [N, hidden_dim]
 scores [C]
 """
 
-from typing import List, Tuple
+
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from models.shared_encoder import sinusoidal_pe
-import math
+
 
 
 class CommitRankingModule(nn.Module):
@@ -99,10 +99,12 @@ class CommitRankingModule(nn.Module):
         ) -> torch.Tensor:
         """
         Args:
-            node_embeddings : [N, hidden_dim]  pre-computed by frozen encoder
-            commit_indices  : [N]              which commit each node belongs to
+            node_embeddings  : [N, hidden_dim]  pre-computed by frozen encoder
+            commit_indices   : [N]              which commit each node belongs to
+            is_temporal_node : [N]              bool mask — True for nodes that
+                               are targets of TEMPORAL_FWD edges (V-SZZ traced)
         Returns:
-            scores           : [C]
+            scores : [C]  per-commit ranking scores
         """
         device = node_embeddings.device
         N = node_embeddings.size(0)

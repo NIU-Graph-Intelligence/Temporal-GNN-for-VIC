@@ -15,7 +15,7 @@ phase1:
   rest_lr: 0.0001
   bert_freeze_bottom_layers: 8
   patience: 10
-  max_pairs_per_test: 150
+  max_pairs_per_test: 100
   dropout: 0.3
   max_graphs_per_batch: 41
   focal_gamma: 2.0

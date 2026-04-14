@@ -17,7 +17,7 @@ compute_summary_statistics — average metrics across folds
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
-
+import numpy as np
 import torch
 
 
@@ -94,54 +94,6 @@ def evaluate_topk_metrics(
         'total_inducing_commits': total_t,
     }
 
-
-
-    if true_cid_map is None:
-        if data_path is None:
-            raise ValueError(
-                "Either true_cid_map or data_path must be provided.")
-        true_cid_map = load_true_commit_map(
-            list(test_cases_graphs.keys()), data_path)
-
-    tp = fp = total_t = 0
-
-    for test_name, ranked in test_cases_graphs.items():
-        if not ranked:
-            continue
-
-        gt_set   = true_cid_map.get(test_name, set())
-        gt_short = {g[:12] for g in gt_set}
-        total_t += len(gt_set)          # fixed: count GT commits not deletion lines
-        cid_set  = set()                # prevent same GT commit counted twice
-
-        for mg in ranked[:k]:
-            # Only check direct inducer — tp=1
-            direct_inducer = mg.tp_to_commit.get(1, '')[:12]
-
-            if not direct_inducer:
-                continue
-
-            if direct_inducer in gt_short:
-                if direct_inducer not in cid_set:
-                    tp += 1             # new GT commit found
-                    cid_set.add(direct_inducer)
-                # already counted — SKIP (not FP)
-            else:
-                fp += 1                 # direct inducer not a GT commit → FP
-
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall    = tp / total_t   if total_t   > 0 else 0.0
-    f1        = (2 * precision * recall / (precision + recall)
-                 if (precision + recall) > 0 else 0.0)
-
-    return {
-        f'precision@{k}': precision,
-        f'recall@{k}':    recall,
-        f'f1@{k}':        f1,
-        f'tp@{k}':        tp,
-        f'fp@{k}':        fp,
-        'total_inducing_commits': total_t,
-    }
 
 def evaluate_top1_metrics(
     test_cases_graphs: Dict[str, List],
@@ -226,3 +178,75 @@ def evaluate_ranking(
             )
 
     return evaluate_top1_metrics(ranked, true_cid, data_path)
+
+
+
+# Phase 2 metrics (per-sample + aggregation)
+
+def compute_metrics(scores: torch.Tensor, ground_truth_positions: List[int],
+                    k_values: List[int] = [1, 2, 3, 5]) -> Dict:
+    """
+    Compute per-sample TP@k, FP@k, MRR, and first rank.
+
+    Returns a flat dict of raw counts suitable for aggregation by
+    ``aggregate_global_metrics``.
+    """
+    if not ground_truth_positions:
+        result: Dict = {"num_gt": 0, "mrr": 0.0, "first_rank": float("inf")}
+        for k in k_values:
+            result[f"tp@{k}"] = 0
+            result[f"fp@{k}"] = 0
+        return result
+
+    ranked = torch.argsort(scores, descending=True).tolist()
+    gt_set = set(ground_truth_positions)
+    result = {"num_gt": 1}
+
+    for k in k_values:
+        hit = bool(set(ranked[:k]) & gt_set)
+        result[f"tp@{k}"] = 1 if hit else 0
+        result[f"fp@{k}"] = 0 if hit else 1
+
+    for rank, idx in enumerate(ranked, 1):
+        if idx in gt_set:
+            result["mrr"] = 1.0 / rank
+            result["first_rank"] = rank
+            break
+    else:
+        result["mrr"] = 0.0
+        result["first_rank"] = len(ranked) + 1
+    return result
+
+
+def aggregate_global_metrics(all_metrics: Dict[str, List],
+                              k_values: List[int] = [1, 2, 3, 5]) -> Dict:
+    """
+    Aggregate per-sample raw counts into global precision / recall / F1.
+
+    Parameters
+    ----------
+    all_metrics : dict mapping metric_name -> list of per-sample values
+                  (accumulated by appending ``compute_metrics`` results)
+    """
+    result: Dict = {}
+    total_gt = sum(all_metrics.get("num_gt", [0]))
+
+    for k in k_values:
+        tp = sum(all_metrics.get(f"tp@{k}", [0]))
+        fp = sum(all_metrics.get(f"fp@{k}", [0]))
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall    = tp / total_gt  if total_gt   else 0.0
+        f1 = (2 * precision * recall / (precision + recall)
+              if (precision + recall) else 0.0)
+        result[f"precision@{k}"] = precision
+        result[f"recall@{k}"]    = recall
+        result[f"f1@{k}"]        = f1
+        result[f"tp_total@{k}"]  = tp
+        result[f"fp_total@{k}"]  = fp
+
+    mrrs = all_metrics.get("mrr", [])
+    result["mrr"]        = float(np.mean(mrrs)) if mrrs else 0.0
+    frs = all_metrics.get("first_rank", [])
+    result["first_rank"] = float(np.mean(frs)) if frs else 0.0
+    result["total_gt"]   = total_gt
+    return result

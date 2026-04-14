@@ -2,7 +2,10 @@
 Scores Phase 1 deletion lines and caches encoder outputs for Phase 2 training.
 """
 
+import logging
 from typing import Dict, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 import torch
 from torch_geometric.data import Batch
@@ -59,8 +62,8 @@ def score_deletion_lines(
             if idx < h.size(0):
                 s = model.ranker.score(h[idx].to(device)).item()
                 all_scored.append((s, mg, h))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to score graph: %s", exc)
 
     with torch.no_grad():
         for name in test_cases:
@@ -241,106 +244,6 @@ def build_phase2_items(
     _log_embedding_stats([i for i in items if i["valid"]])
     return items
 
-
-           
-
-#  Step 2: convert cached encoder outputs (top-1 and top-3 deletion line embeddings) into Phase 2 training items 
-# def build_phase2_items(
-#     scored: Dict[str, List[Tuple]],
-#     all_cases: List[str],
-# ) -> List[dict]:
-    """
-    For each test case, find the first deletion line in the scored list
-    that contains the inducing commit and use that for Phase 2.
-
-    Works for both top_k=1 and top_k=3 — always produces exactly one
-    item per test case (or invalid if no deletion line has inducing commit).
-    """
-
-    def _make_invalid(name: str) -> dict:
-        return {
-            "test_name":              name,
-            "valid":                  False,
-            "node_embeddings":        None,
-            "commit_indices":         None,
-            "is_temporal_node":       None,
-            "ground_truth_positions": [],
-        }
-
-    items:   List[dict] = []
-    n_valid: int        = 0
-
-    for tc_idx, test_name in enumerate(all_cases):
-        entry = scored.get(test_name)
-        if entry is None:
-            items.append(_make_invalid(test_name))
-            continue
-
-        # Find first deletion line that has the inducing commit
-        selected = None
-        for p1_score, mg, cached_h in entry:
-            commit_to_tp = {
-                sha[:12]: tp
-                for tp, sha in mg.tp_to_commit.items() if tp > 0
-            }
-            gt_positions_raw = sorted({
-                commit_to_tp[sha[:12]]
-                for sha in mg.inducing_commits
-                if sha[:12] in commit_to_tp
-            })
-            if gt_positions_raw:
-                selected = (mg, cached_h, gt_positions_raw)
-                break
-
-        if selected is None:
-            items.append(_make_invalid(test_name))
-            continue
-
-        mg, cached_h, gt_positions_raw = selected
-
-        # Node embeddings and commit indices
-        node_embeddings = cached_h[1:]
-        commit_indices  = mg.pyg.temporal_pos.cpu()[1:] - 1
-
-        if node_embeddings.size(0) == 0 or commit_indices.numel() == 0:
-            items.append(_make_invalid(test_name))
-            continue
-
-        # Temporal mask
-        edge_index        = mg.pyg.edge_index
-        edge_type         = mg.pyg.edge_type
-        temporal_fwd_type = EdgeType.TEMPORAL_FWD
-        temporal_mask_full = torch.zeros(mg.pyg.num_nodes, dtype=torch.bool)
-        temporal_dst = edge_index[1][edge_type == temporal_fwd_type]
-        temporal_mask_full[temporal_dst] = True
-        is_temporal_node = temporal_mask_full[1:]
-
-        # Validate gt positions in bounds
-        gt_positions = [tp - 1 for tp in gt_positions_raw]
-        n_commits    = int(commit_indices.max().item()) + 1
-        gt_positions = [g for g in gt_positions if g < n_commits]
-
-        if not gt_positions:
-            items.append(_make_invalid(test_name))
-            continue
-
-        items.append({
-            "test_name":              test_name,
-            "valid":                  True,
-            "node_embeddings":        node_embeddings,
-            "commit_indices":         commit_indices,
-            "is_temporal_node":       is_temporal_node,
-            "ground_truth_positions": gt_positions,
-        })
-        n_valid += 1
-
-        if (tc_idx + 1) % 50 == 0:
-            print(f"    [{tc_idx+1}/{len(all_cases)}] "
-                  f"{n_valid} valid embeddings built")
-
-    print(f"  Phase 2 embeddings: {n_valid}/{len(all_cases)} valid")
-    _log_embedding_stats([i for i in items if i["valid"]])
-    return items
 
 
 def _log_embedding_stats(valid_items: List[dict]) -> None:

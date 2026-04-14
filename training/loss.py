@@ -107,14 +107,10 @@ class LabelSmoothingRankingLoss(nn.Module):
         ground_truth_positions: List[int],
     ) -> torch.Tensor:
 
-        # if len(scores) < 2:
-        #     return torch.tensor(0.0, device=scores.device, requires_grad=True)
 
         num_commits = len(scores)
         num_gt      = len(ground_truth_positions)
 
-        # if num_gt == 0:
-        #     return torch.tensor(0.0, device=scores.device, requires_grad=True)
 
         # Create GT mask
         gt_mask  = torch.zeros(num_commits, dtype=torch.bool, device=scores.device)
@@ -158,52 +154,4 @@ class LabelSmoothingRankingLoss(nn.Module):
         return focal_loss + 0.5 * margin_loss
 
 
-# Phase 2
-class CommitRankingLoss(nn.Module):
-    def __init__(
-        self,
-        temperature: float = 0.1,   
-        margin:      float = 0.5,   # realistic given actual score ranges
-        smoothing:   float = 0.05,  # lighter smoothing
-    ):
-        super().__init__()
-        self.temperature = temperature
-        self.margin      = margin
-        self.smoothing   = smoothing
 
-    def forward(
-        self,
-        scores: torch.Tensor,
-        ground_truth_positions: List[int],
-    ) -> torch.Tensor:
-
-        num_commits = len(scores)
-        num_gt      = len(ground_truth_positions)
-
-        # ── Component 1: ListNet loss (listwise, directly optimizes ranking) ──
-        gt_mask = torch.zeros(num_commits, dtype=torch.bool, device=scores.device)
-        gt_mask[ground_truth_positions] = True
-
-        # Soft targets with light label smoothing
-        smooth_neg = self.smoothing / max(num_commits - num_gt, 1)
-        soft_targets = torch.full_like(scores, smooth_neg)
-        soft_targets[gt_mask] = (1.0 - self.smoothing) / num_gt
-        
-        # Normalize to sum to 1
-        soft_targets = soft_targets / soft_targets.sum()
-
-        # Lower temperature sharpens the softmax — forces bigger score separation
-        log_probs = F.log_softmax(scores / self.temperature, dim=0)
-        listnet_loss = -torch.sum(soft_targets * log_probs)
-
-        # ── Component 2: Pairwise margin loss with realistic margin ──
-        gt_scores  = scores[gt_mask]
-        neg_scores = scores[~gt_mask]
-
-        if gt_scores.numel() > 0 and neg_scores.numel() > 0:
-            diffs       = gt_scores.unsqueeze(1) - neg_scores.unsqueeze(0)
-            margin_loss = F.relu(self.margin - diffs).mean()
-        else:
-            margin_loss = torch.tensor(0.0, device=scores.device)
-
-        return listnet_loss + margin_loss 

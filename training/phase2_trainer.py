@@ -1,17 +1,21 @@
 """
+training/phase2_trainer.py
+
 Phase 2 training loop: commit ranking on pre-computed node embeddings.
 
-The frozen Phase 1 encoder has already been applied during the embedding pre-computation step (training/embedding_cache.py).  This trainer only optimises CommitRankingModule.
+The frozen Phase 1 encoder has already been applied during the embedding
+pre-computation step (training/embedding_cache.py).  This trainer only
+optimises CommitRankingModule.
 """
 
 import copy
 import gc
-import random
 import time
 from collections import defaultdict
 from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -20,16 +24,17 @@ from torch.utils.data import DataLoader, Subset
 
 from data.dataset import collate_commit_ranking
 from models.phase2_model import CommitRankingModule
-from training.loss import LabelSmoothingRankingLoss, CommitRankingLoss
+from training.loss import LabelSmoothingRankingLoss
 from training.utils import (
     EarlyStopping,
-    aggregate_global_metrics,
     build_phase2_model,
     clip_and_step,
-    compute_metrics,
     setup_device,
 )
+from training.evaluation import compute_metrics, aggregate_global_metrics
 
+
+# Epoch runner
 
 def _run_epoch(
     model: CommitRankingModule,
@@ -44,8 +49,8 @@ def _run_epoch(
 ) -> Tuple[float, Dict]:
     """
     Args:
-        training     : True  → model.train(), backprop, gradient accumulation.
-                       False → model.eval(), torch.no_grad(), no backprop.
+        training     : True  -> model.train(), backprop, gradient accumulation.
+                       False -> model.eval(), torch.no_grad(), no backprop.
         log_interval : print a running summary every N batches (training only).
         grad_accum   : gradient accumulation steps (training only).
 
@@ -91,7 +96,6 @@ def _run_epoch(
                     with torch.no_grad():
                         for k, v in compute_metrics(scores, gt).items():
                             all_m[k].append(v)
-                
 
                 if b_count:
                     total_loss    += b_loss.item() * (grad_accum if training else 1)
@@ -174,19 +178,6 @@ def train_phase2_fold(
         **loader_kw,
     )
 
-    train_loader = DataLoader(
-        Subset(phase2_dataset, train_indices),
-        batch_size=config["phase2"]["batch_size"],
-        shuffle=True,
-        **loader_kw,
-    )
-    val_loader = DataLoader(
-        Subset(phase2_dataset, val_indices),
-        batch_size=config["phase2"]["batch_size"],
-        shuffle=False,
-        **loader_kw,
-    )
-
     model = build_phase2_model(config, device)
     print(f"  Device: {device}")
     print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -204,11 +195,7 @@ def train_phase2_fold(
         focal_gamma=config["phase2"]["focal_gamma"],
         focal_alpha=config["phase2"]["focal_alpha"],
     )
-    # loss_fn = CommitRankingLoss(
-    #     temperature=config["phase2"]["temperature"],
-    #     margin=config["phase2"]["margin"],
-    #     smoothing=config["phase2"]["label_smoothing"],
-    # )
+
     stopper = EarlyStopping(patience=config["phase2"]["patience"], mode="max")
     ga      = config["phase2"]["gradient_accumulation_steps"]
 
@@ -226,7 +213,7 @@ def train_phase2_fold(
         tr_loss, tr_m = _run_epoch(
             model, train_loader, optimizer, loss_fn, device,
             training=True, log_interval=config["defaults"]["log_interval"], grad_accum=ga)
-        
+
         vl_loss, vl_m = _run_epoch(
             model, val_loader, optimizer, loss_fn, device,
             training=False
@@ -263,9 +250,7 @@ def train_phase2_fold(
     if best_state:
         model.load_state_dict(best_state)
 
-    _, final_m = _run_epoch(
-        model, val_loader, optimizer, loss_fn, device, training=False
-    )
+    final_m = best_metrics or {}
 
     print(
         f"\n  Fold {fold_idx+1} best (epoch {best_epoch}): "

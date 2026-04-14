@@ -1,6 +1,6 @@
 """
 data/phase1/minigraph.py
-────────────────────────
+
 MiniGraph — one deletion line with its full-graph PyG context.
 """
 

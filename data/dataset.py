@@ -1,6 +1,6 @@
 """
 data/dataset.py
-───────────────
+
 DeletionLineDataset — loads pre-built Phase 1 graphs for training and evaluation.
 
 The graph structure is assembled by ``build_temporal_graphs.py``
@@ -184,8 +184,8 @@ class DeletionLineDataset:
                         for sha in json.load(f).get("induce", []):
                             inducing.add(sha)
                             inducing.add(sha[:12])
-                except Exception:
-                    pass
+                except (OSError, json.JSONDecodeError) as exc:
+                    logger.warning("Failed to read %s: %s", info_path, exc)
             for mg in graphs:
                 mg.inducing_commits = inducing
 

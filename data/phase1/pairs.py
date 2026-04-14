@@ -1,8 +1,8 @@
 """
-data/pairs.py
-─────────────
-DeletionLinePair, Batch, combine_pairs_to_batches — pairwise training
-primitives for Phase 1 ranking.
+data/phase1/pairs.py
+
+DeletionLinePair, TestCaseBatch, combine_testcases_to_batches — pairwise
+training primitives for Phase 1 ranking.
 """
 
 import random
@@ -11,7 +11,7 @@ from typing import Dict, List
 
 from data.phase1.minigraph import MiniGraph
 
-
+@dataclass
 class DeletionLinePair:
     """
     Pairwise training example.
@@ -20,11 +20,9 @@ class DeletionLinePair:
     prob = 0.0  →  y should rank higher than x  (y is rootcause)
     prob = 0.5  →  tied (both same class)
     """
-
-    def __init__(self, minig1: MiniGraph, minig2: MiniGraph, prob: float) -> None:
-        self.x    = minig1
-        self.y    = minig2
-        self.prob = prob
+    x:    MiniGraph
+    y:    MiniGraph
+    prob: float
 
 
 @dataclass
