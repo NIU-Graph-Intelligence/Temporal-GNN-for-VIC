@@ -9,6 +9,7 @@ from transformers import AutoTokenizer, AutoModel
 
 from data.constants import NUM_EDGE_TYPES
 
+# MODEL_NAME = "microsoft/codebert-base"
 MODEL_NAME = "microsoft/unixcoder-base-nine"
 MAX_LEN = 64
 EMB_DIM = 768
@@ -172,13 +173,15 @@ class SharedEncoder(nn.Module):
                  num_edge_types: int = NUM_EDGE_TYPES, dropout: float = 0.2,
                  max_temporal_positions: int = 20, use_checkpoint: bool = True,
                  include_bert: bool = True, num_bert_layers_freeze: int = 0,
-                 bert_chunk: int = 256):
+                 bert_chunk: int = 256,
+                 use_temporal_pe: bool = True):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.include_bert = include_bert
         self.bert_chunk = bert_chunk
         self.use_checkpoint = use_checkpoint
-
+        self.use_temporal_pe = use_temporal_pe
+        
         if include_bert:
             self.bert_model = AutoModel.from_pretrained(MODEL_NAME)
             if num_bert_layers_freeze > 0:
@@ -202,15 +205,7 @@ class SharedEncoder(nn.Module):
             for _ in range(num_gt_layers)
         ])
 
-    # def _find_bert_anchor(self):
-    #     """Find the first trainable non-pooler BERT param (for checkpointing)."""
-    #     if not self.include_bert:
-    #         return None
-    #     return next(
-    #         (p for name, p in self.bert_model.named_parameters()
-    #          if p.requires_grad and "pooler" not in name),
-    #         None,
-    #     )
+   
 
     def _run_bert(self, token_ids: torch.Tensor,
                   attention_mask: torch.Tensor) -> torch.Tensor:
@@ -269,7 +264,8 @@ class SharedEncoder(nn.Module):
             x = self._run_bert(token_ids, attention_mask)
 
         h = self.input_proj(x)
-        if temporal_pos is not None:
+
+        if self.use_temporal_pe and temporal_pos is not None:
             clamped = temporal_pos.clamp(0, self.temporal_pos_embedding.size(0) - 1)
             h = h + self.temporal_pos_embedding[clamped]
         for layer in self.gt_layers:

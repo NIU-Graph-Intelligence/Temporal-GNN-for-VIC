@@ -91,7 +91,8 @@ class DeletionLineRankingModel(nn.Module):
                 dropout: float = 0.2,
                 include_bert: bool = True,
                 num_bert_layers_freeze: int = 8,
-                bert_chunk: int = 256):
+                bert_chunk: int = 256,
+                use_temporal_pe: bool = False):
 
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -107,6 +108,7 @@ class DeletionLineRankingModel(nn.Module):
             include_bert=include_bert,
             num_bert_layers_freeze=num_bert_layers_freeze,
             bert_chunk=bert_chunk,
+            use_temporal_pe=use_temporal_pe,
         )
         self.ranker = DeletionLineRanker(hidden_dim)
 
